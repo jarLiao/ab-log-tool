@@ -12,7 +12,7 @@
     return '<span class="seq-primary mono">' + main + '</span><span class="seq-secondary mono">' + secondary + '</span>';
   }
   const colors = {gap: '#a34f05', reorder: '#067d75', duplicate: '#366cb4', collision: '#7743ad',
-    parse: '#b13d38', uncertain: '#b13d38', rawOnly: '#a34f05', filteredOnly: '#366cb4', pairOrder: '#067d75', pairUncertain: '#7743ad', matched: '#067d75'};
+    parse: '#b13d38', uncertain: '#b13d38', rollback: '#b13d38', rawOnly: '#a34f05', filteredOnly: '#366cb4', pairOrder: '#067d75', pairUncertain: '#7743ad', matched: '#067d75'};
   let worker, pending = new Map(), requestId = 0, renderId = 0, meta = null;
   let mode = 'raw', inputMode = 'raw', selected = '', currentView = null, activeChart = {}, focused = true;
   let files = {raw: null, filtered: null}, contextText = '', toastTimer, filterTimer, demo = false, started = 0;
@@ -67,7 +67,7 @@
     document.querySelectorAll('[data-input]').forEach(b => { b.classList.toggle('active', b.dataset.input === m); b.setAttribute('aria-pressed', String(b.dataset.input === m)); });
     $('rawDrop').hidden = m === 'filtered'; $('filteredDrop').hidden = m === 'raw';
     $('importDescription').textContent = m === 'pair' ? '选择同一设备、同一次连续连接的原始日志和过滤后日志。' :
-      m === 'filtered' ? '选择 abFilter 过滤后日志。缺号可能来自正常过滤。' : '选择 abBle 原始接收日志。每份文件按同一次连续连接分析。';
+      m === 'filtered' ? '选择 abFilter 过滤后日志。缺号可能来自正常过滤。' : '选择同一设备的 abBle 原始接收日志。持续序号回退会分段并标记待核对。';
     $('importError').hidden = true;
   }
   function chooseFile(side, file) {
@@ -116,6 +116,7 @@
     $('kindFilter').value = $('coverageFilter').value = 'all';
   }
   function stats(items) {
+    $('stats').classList.toggle('extended', items.length > 6);
     $('stats').innerHTML = items.map(([label, value, sub, kind, tone]) =>
       '<' + (kind ? 'button' : 'div') + ' class="stat ' + (tone || '') + '" data-stat="' + (kind || '') + '" data-count="' + (kind || 'frames') +
       '"><div class="stat-label">' + label + '</div><div class="stat-num">' + num(value) +
@@ -133,11 +134,12 @@
     $('countHead').textContent = m === 'pair' ? '覆盖范围' : '数量';
     $('chartSide').hidden = m !== 'pair'; $('coverageLabel').hidden = m !== 'pair';
     $('chartSide').value = activeChart.side;
-    const kinds = m === 'pair' ? ['rawOnly', 'filteredOnly', 'pairOrder', 'pairUncertain', 'matched'] : ['gap', 'reorder', 'duplicate', 'collision', 'parse', 'uncertain'];
+    const kinds = m === 'pair' ? ['rawOnly', 'filteredOnly', 'pairOrder', 'pairUncertain', 'matched'] : ['gap', 'rollback', 'reorder', 'duplicate', 'collision', 'parse', 'uncertain'];
     $('kindFilter').innerHTML = '<option value="all">全部' + (m === 'pair' ? '差异' : '异常') + '</option>' + kinds.map(k => '<option value="' + k + '">' + E.names[k] + '</option>').join('');
     const cmds = m === 'pair' ? [...new Set([...meta.raw.commands, ...meta.filtered.commands])].sort((a, b) => a - b) : meta[m].commands;
     $('commandFilter').innerHTML = '<option value="">全部命令</option>' + cmds.map(n => '<option value="' + n + '">' + E.hexByte(n) + '</option>').join('');
     let notices = [];
+    $('segmentSummary').hidden = true;
     if (m === 'pair') {
       const c = meta.pair.counts;
       $('fileDescription').textContent = meta.raw.name + '  /  ' + meta.filtered.name;
@@ -149,15 +151,25 @@
       notices.push('配对只展示两份日志的差异，不自动判断过滤原因。');
       if (!meta.pair.overlap) notices.push('两份文件没有可用的共有时间范围，覆盖范围标为待核对。');
       if (meta.raw.counts.parse + meta.filtered.counts.parse) notices.push('存在解析异常，损坏帧不参与配对。');
+      if (meta.raw.segments > 1 || meta.filtered.segments > 1) notices.push('存在序号分段，段间连续性待核对；配对仍按接收时间和完整报文逐次匹配。');
     } else {
       const s = meta[m], c = s.counts;
       $('fileDescription').textContent = s.name + ' · ' + bytes(s.bytes) + ' · ' + num(s.lineCount) + ' 行';
-      stats([['有效报文', c.frames, num(s.diagnostics) + ' 行诊断文字'], ['最终缺号', c.gap, num(c.gapRanges) + ' 个区间', 'gap', 'alert'],
+      const items = [['有效报文', c.frames, num(s.diagnostics) + ' 行诊断文字'], [s.segments > 1 ? '段内最终缺号' : '最终缺号', c.gap, s.segments > 1 ? '段间数量待核对' : num(c.gapRanges) + ' 个区间', 'gap', 'alert'],
         ['乱序补到', c.reorder, '已从缺号中移除', 'reorder'], ['重复记录', c.duplicate, '完整帧相同', 'duplicate'],
-        ['同号不同内容', c.collision, '单独核对', 'collision', 'special'], ['解析异常', c.parse, '保留原始证据', 'parse', c.parse ? 'alert' : '']]);
+        ['同号不同内容', c.collision, s.segments > 1 ? '各段内部核对' : '单独核对', 'collision', 'special'], ['解析异常', c.parse, '保留原始证据', 'parse', c.parse ? 'alert' : '']];
+      if (c.rollback) items.splice(2, 0, ['序号回退', c.rollback, '点击查看待核对边界', 'rollback', 'alert']);
+      stats(items);
       $('coverage').textContent = c.frames ? '覆盖 ' + shortTime(s.minTime) + '–' + shortTime(s.maxTime) + '（北京时间） · ' + s.wraps + ' 次回绕 · ' + s.segments + ' 个可分析段' : '没有可参与序号分析的完整有效报文';
       if (m === 'filtered') notices.push('过滤日志的缺号可能来自正常过滤，请结合原始日志核对。');
-      if (c.uncertain) notices.push(c.uncertain + ' 处序号跨度待核对；最终缺号不含跨段未决范围，可在类型筛选中查看。');
+      if (c.rollback) notices.push(c.rollback + ' 处持续回退待核对，已划分 ' + s.segments + ' 个分析段。段内缺号为 0 不代表整份日志完整；段间是否缺失、是否重置或重放，需要核对设备记录。');
+      if (c.uncertain) notices.push(c.uncertain + ' 处序号跨度待核对；段内最终缺号不含跨段未决范围，可在类型筛选中查看。');
+      if (s.segments > 1) {
+        $('segmentSummary').hidden = false;
+        $('segmentSummaryTitle').textContent = '查看 ' + s.segments + ' 个分析段的范围与段内缺号';
+        $('segmentRows').innerHTML = s.segmentRanges.map(p => '<tr><td>' + p.segment + '</td><td class="mono">L' + p.firstLine + '–L' + p.lastLine +
+          '</td><td class="mono">' + E.hexWord(p.firstSid) + ' → ' + E.hexWord(p.lastSid) + '</td><td>' + num(p.frames) + '</td><td>' + num(p.gap) + '</td></tr>').join('');
+      }
       if (c.parse) notices.push(c.parse + ' 条解析 / 校验异常；相关不可信序号未计为有效报文。');
       if (!c.frames) notices.push('未识别到有效报文。请核对日志是否为“毫秒时间戳,十六进制报文”格式，可从解析异常查看原文。');
     }

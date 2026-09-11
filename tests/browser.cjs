@@ -103,11 +103,56 @@ async function importTask(page,mode,raw,filtered){
       await page.locator('#chart [data-chart-id]').first().focus();await page.keyboard.press('Enter');
       ok('Chart anomaly markers support keyboard activation');
     }
+    if(process.env.AB_ROLLBACK_LOG){
+      await importTask(page,'raw',process.env.AB_ROLLBACK_LOG);
+      await expectCount(page,'rollback',6);
+      ok('Reported log has 27888 frames and six rollback boundaries, without the old 904 late / 6639 collision errors',await readCount(page,'frames')===27888&&await readCount(page,'reorder')===0&&await readCount(page,'collision')===0);
+      ok('Zero missing IDs is explicitly limited to each segment',(await page.locator('[data-count="gap"]').innerText()).includes('段内最终缺号')&&(await page.locator('#qualityNote').innerText()).includes('不代表整份日志完整')&&await readCount(page,'gap')===0);
+      await page.locator('#segmentSummary summary').click();
+      ok('Seven expandable segment ranges preserve every valid frame',await page.locator('#segmentRows tr').count()===7&&await page.locator('#segmentRows tr').evaluateAll(rows=>rows.reduce((sum,row)=>sum+Number(row.cells[3].textContent.replaceAll(',','')),0))===27888);
+      ok('Segment table preserves both source ranges and normal wrap',(await page.locator('#segmentRows').innerText()).includes('L12962–L13132')&&(await page.locator('#segmentRows').innerText()).includes('0xBB76 → 0x0E71'));
+      await page.locator('#segmentSummary summary').click();
+      await page.locator('[data-stat="rollback"]').click();
+      await page.waitForFunction(()=>document.querySelector('#resultCount').textContent==='6 条');
+      ok('Rollback card filters all six reviewable boundaries',await page.locator('#kindFilter').inputValue()==='rollback');
+      ok('Boundary detail shows before and after IDs instead of calling them late arrivals',(await page.locator('#detailTitle').innerText()).includes('0xD848 → 0xBB71'));
+      ok('Both original counter byte anchors remain exact and preserve lowercase source text',JSON.stringify(await page.locator('.seq-byte-mark').allTextContents())===JSON.stringify(['71','bb','48','d8']));
+      ok('Boundary retains adjacent original lines and a cautious cause description',(await page.locator('#codeSections').innerText()).includes('L12960')&&(await page.locator('#codeSections').innerText()).includes('L12962')&&(await page.locator('#detailSummary').innerText()).includes('可能涉及'));
+      ok('Chart breaks the line at the rollback boundary',((await page.locator('#chart > path').getAttribute('d')).match(/M/g)||[]).length===2&&(await page.locator('#chart').innerHTML()).includes('序号回退 · 待核对分段'));
+      await page.locator('#sequenceBase').selectOption('dec');
+      ok('Decimal mode also shows both boundary anchors',(await page.locator('#detailTitle .seq-primary').innerText())==='55368 → 47985');
+      await page.locator('#search').fill('0xD848');
+      await page.waitForFunction(()=>document.querySelector('#resultCount').textContent==='1 条');
+      ok('Search can locate a boundary using its previous HEX sequence');
+      await page.locator('#search').fill('');
+      await page.waitForFunction(()=>document.querySelector('#resultCount').textContent==='6 条');
+      await page.locator('#sequenceBase').selectOption('hex');
+      for(const width of [1440,1280,390]){
+        await page.setViewportSize({width,height:1080});
+        ok('Rollback cards and longer labels do not overflow at '+width,await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+        await page.screenshot({path:path.join(out,'rollback-'+width+'.png'),fullPage:true});
+      }
+      await page.setViewportSize({width:1440,height:1080});
+      await page.locator('#exportBtn').click();
+      const csvDownload=page.waitForEvent('download');await page.locator('#csvBtn').click();const csvFile=await csvDownload;
+      const csvPath=path.join(out,'rollback.csv');await csvFile.saveAs(csvPath);const csv=fs.readFileSync(csvPath,'utf8');
+      ok('Rollback CSV downloads all six boundaries with before IDs and conditional scope',csv.split('\r\n').filter(Boolean).length===7&&csv.includes('回退前序号HEX')&&csv.includes('0xD848')&&csv.includes('按段统计；段间待核对'));
+      const txtDownload=page.waitForEvent('download');await page.locator('#txtBtn').click();const txtFile=await txtDownload;
+      const txtPath=path.join(out,'rollback-context.txt');await txtFile.saveAs(txtPath);const txt=fs.readFileSync(txtPath,'utf8');
+      ok('Rollback TXT downloads actual source anchors and unresolved continuity',txt.includes('7 个可分析段')&&txt.includes('缺号为 0 不代表整份日志完整')&&txt.includes('L12960')&&txt.includes('L12962'));
+      await page.locator('#exportDialog [data-close]').click();
+      await importTask(page,'pair',process.env.AB_ROLLBACK_LOG,process.env.AB_ROLLBACK_LOG);
+      await page.locator('[data-mode="pair"]').click();await expectCount(page,'matched',27888);
+      ok('Segmenting does not change exact frame pairing or leak the single-file segment table',await readCount(page,'rawOnly')===0&&await readCount(page,'filteredOnly')===0&&!await page.locator('#segmentSummary').isVisible()&&(await page.locator('#qualityNote').innerText()).includes('段间连续性待核对'));
+      await page.locator('[data-mode="filtered"]').click();await expectCount(page,'rollback',6);
+      ok('Filtered mode independently exposes the same six uncertain boundaries',await page.locator('#segmentSummary').isVisible()&&(await page.locator('#qualityNote').innerText()).includes('过滤日志的缺号可能来自正常过滤'));
+    }
     await context.setOffline(true);
     const fa=E.makeFrame(33796),fb=E.makeFrame(33798);
     const fragmented=1800000000000+','+fa.slice(0,14)+'\nerror fragment\n'+1800000000001+','+fa.slice(14)+fb;
     await importTask(page,'raw',{name:'fragment-anchors.txt',mimeType:'text/plain',buffer:Buffer.from(fragmented)});
     await expectCount(page,'frames',2);
+    ok('A new continuous analysis clears the previous segment warning and extra card',!await page.locator('#segmentSummary').isVisible()&&await page.locator('#stats .stat').count()===6);
     ok('Split fields and multiple frames per line keep accurate original highlights',JSON.stringify(await page.locator('.seq-byte-mark').allTextContents())===JSON.stringify(['06','84','04','84']));
     await page.locator('[data-locate-byte="1:7"]').click();
     ok('Cross-line high byte locator remains usable',await page.evaluate(()=>document.activeElement?.closest('.code-line').querySelector('.ln').textContent==='3'));

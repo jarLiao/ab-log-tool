@@ -16,7 +16,7 @@ const lines = ids => ids.map((id, i) => (base + i) + ',' + (typeof id === 'numbe
 const parse = (ids, side = 'raw') => E.parse(lines(ids), side + '.txt', side);
 const kinds = (s, type) => s.events.filter(e => e.kind === type);
 const zeros = s => {
-  for (const k of ['gap', 'reorder', 'duplicate', 'collision', 'parse', 'uncertain']) assert.equal(s.counts[k], 0, k);
+  for (const k of ['gap', 'reorder', 'duplicate', 'collision', 'parse', 'uncertain', 'rollback']) assert.equal(s.counts[k], 0, k);
 };
 test('CRC16 XMODEM known check value', () => assert.equal(E.crc16(Buffer.from('123456789')), 0x31c3));
 test('V01 continuous sequence', () => { const s = parse([100,101,102]); zeros(s); assert.equal(s.counts.frames, 3); });
@@ -105,6 +105,69 @@ test('unresolvable large jump does not create false missing IDs', () => {
   const s=parse([100,60000,60001]); assert.equal(s.counts.uncertain,1); assert.equal(s.counts.gap,0); assert.equal(s.segments,2);
   const half=parse([0,32768]); assert.equal(half.counts.uncertain,1);
 });
+const series = (start, count, version = 0) => Array.from({length:count}, (_,i) => frame((start+i)&65535,[0x7b,3,0x11,version]));
+
+test('sustained sequence reuse is separated instead of thousands of late and conflicting frames', () => {
+  const runs=[[48889,6480],[47985,43],[47986,44],[47987,17],[47988,9],[47989,51],[47990,21244]];
+  const s=parse(runs.flatMap(([sid,count],i)=>series(sid,count,i)));
+  assert.equal(s.counts.frames,27888); assert.equal(s.counts.rollback,6); assert.equal(s.segments,7);
+  for(const key of ['gap','reorder','duplicate','collision','parse','uncertain']) assert.equal(s.counts[key],0,key);
+  assert.equal(s.wraps,1);
+  assert.deepEqual(kinds(s,'rollback').map(e=>[e.previousSid,e.sid,e.segment]),[[55368,47985,2],[48027,47986,3],[48029,47987,4],[48003,47988,5],[47996,47989,6],[48039,47990,7]]);
+  assert.deepEqual(s.segmentRanges.map(p=>p.frames),runs.map(r=>r[1]));
+});
+
+test('a batch filling a known gap remains late arrivals, not a sequence rollback', () => {
+  const s=parse([100,110,101,102,103,104,105,106,107,108,109,111]);
+  assert.equal(s.counts.gap,0); assert.equal(s.counts.reorder,9); assert.equal(s.counts.rollback,0); assert.equal(s.segments,1);
+});
+
+test('identical replay and isolated differing content retain their original meaning', () => {
+  const a=series(100,8);
+  const replay=parse([...a,...a]); assert.equal(replay.counts.duplicate,8); assert.equal(replay.counts.rollback,0);
+  const collision=parse([...a,frame(103,[0x7b,3,0x11,2]),108,109,110,111]);
+  assert.equal(collision.counts.collision,1); assert.equal(collision.counts.rollback,0);
+});
+
+test('an earlier segment cannot fill a missing sequence in a later reused range', () => {
+  const s=parse([...series(100,11),...series(100,4,1),...series(105,5,1)]);
+  assert.equal(s.counts.rollback,1); assert.equal(s.counts.gap,1);
+  const gap=kinds(s,'gap')[0]; assert.equal(gap.from,104); assert.equal(gap.segment,2);
+  assert.equal(s.rows[gap.relatedIndex].segment,2); assert.equal(s.rows[gap.index].segment,2);
+});
+
+test('a large leading rollback needs sustained progress and has correct segment metadata', () => {
+  const s=parse([...series(10000,4),...series(100,4)]);
+  assert.equal(s.counts.rollback,1); assert.equal(s.counts.reorder,0); assert.equal(s.counts.gap,0);
+  const e=kinds(s,'rollback')[0]; assert.equal(e.segment,2); assert.equal(e.cycle,0);
+  assert.equal(E.detail({raw:s},e).sections[1].frame.sid,10003);
+  const uncertain=parse([100,60000,60001]);
+  assert.equal(kinds(uncertain,'uncertain')[0].segment,2);
+});
+
+test('rollback reports, search and chart retain both boundary anchors and conditional gap scope', () => {
+  const s=parse([...series(10000,4),...series(100,4)]),e=kinds(s,'rollback')[0],data={raw:s};
+  assert.equal(E.selectEvents(data,'raw',{query:'10003'}).length,1);
+  assert.equal(E.selectEvents(data,'raw',{query:'0x0064'}).length,1);
+  assert.ok(E.hexLabel(e).includes('0x2713')); assert.ok(E.hexLabel(e).includes('0x0064'));
+  assert.ok(E.chart(data,'raw',{},{}).wraps.some(w=>w.label.includes('回退')));
+  const csv=E.exportParts(data,s.events,'csv').join(''),txt=E.exportParts(data,s.events,'txt').join('');
+  assert.ok(csv.includes('回退前序号HEX')); assert.ok(csv.includes('段间待核对'));
+  assert.ok(txt.includes('段间待核对')); assert.ok(txt.includes('0x2713'));
+});
+
+test('normal rollover is continuous even when content changes', () => {
+  const s=parse([frame(65534),frame(65535,[0x7b,3,1,1]),frame(0,[0x7b,3,1,2]),frame(1)]);
+  zeros(s); assert.equal(s.wraps,1); assert.equal(s.segments,1);
+});
+
+if(process.env.AB_ROLLBACK_LOG) test('reported rollback log contains six distinct counter transitions', () => {
+  const s=E.parse(fs.readFileSync(process.env.AB_ROLLBACK_LOG,'utf8'));
+  assert.equal(s.counts.frames,27888); assert.equal(s.counts.rollback,6); assert.equal(s.segments,7);
+  assert.equal(s.counts.gap,0); assert.equal(s.counts.reorder,0); assert.equal(s.counts.collision,0);
+  assert.deepEqual(kinds(s,'rollback').map(e=>e.line),[12962,13136,13314,13384,13422,13628]);
+});
+
 test('pair comparison preserves occurrences and marks ambiguous correspondence', () => {
   const a=base+','+frame(100),b=(base+1)+','+frame(101);
   const r=E.parse(a+'\n'+a+'\n'+b,'r','raw'),f=E.parse(a+'\n'+b,'f','filtered'),p=E.compare(r,f);

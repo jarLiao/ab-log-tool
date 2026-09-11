@@ -56,6 +56,13 @@ h2{font-size:20px}h3{font-size:15px}
 .session-status{color:var(--teal);font-size:12px;white-space:nowrap}
 .notice{padding:11px 14px;border:1px solid #edceaa;border-radius:8px;background:var(--orange-bg);color:#824609;font-size:13px}
 .stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
+.stats.extended{grid-template-columns:repeat(7,minmax(0,1fr))}
+.segment-summary{border:1px solid var(--line);border-radius:8px;background:#fff;min-width:0;font-size:13px}
+.segment-summary summary{cursor:pointer;min-height:44px;display:list-item;margin-inline-start:30px;padding:12px 14px 12px 0;color:var(--ink)}
+.segment-table{overflow-x:auto;padding:0 14px 12px}
+.segment-table table{width:100%;border-collapse:collapse;white-space:nowrap;text-align:left}
+.segment-table td,.segment-table th{padding:8px 12px;border-bottom:1px solid var(--line)}
+.rollback-text{color:#a33d39}
 .stat{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:13px 14px;min-height:98px;text-align:left;color:var(--ink)}
 .stat-label{color:var(--muted);font-size:13px}
 .stat-num{font:600 27px/1.25 "Segoe UI",sans-serif;letter-spacing:-.5px;font-variant-numeric:tabular-nums;margin:4px 0}
@@ -109,7 +116,7 @@ select,input[type=datetime-local]{border:1px solid var(--line);border-radius:6px
 .tag.collision,.tag.pairUncertain{color:var(--purple);background:#f3edfa}
 .tag.reorder,.tag.matched{color:var(--teal);background:#e7f5f2}
 .tag.duplicate,.tag.rawOnly,.tag.filteredOnly,.tag.pairOrder{color:#285ea8;background:#edf3ff}
-.tag.parse,.tag.uncertain{color:#a33d39;background:#fbeeed}
+.tag.parse,.tag.uncertain,.tag.rollback{color:#a33d39;background:#fbeeed}
 .table-footer{padding:10px 13px;display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);flex-wrap:wrap;border-top:1px solid var(--line)}
 .pagination{display:flex;align-items:center;gap:8px;white-space:nowrap}
 .empty{padding:45px 24px;text-align:center;color:var(--muted);font-size:14px;line-height:1.8}
@@ -178,3 +185,5 @@ progress{width:100%;height:10px;accent-color:var(--blue);display:block;margin:25
 @media(max-width:950px){.workbench{grid-template-columns:1fr}.code-sections{max-height:400px}.side{padding-inline:10px}.topbar{padding-inline:18px}.session-status{white-space:normal}.chart-legend{font-size:12px}.table-wrap{height:320px}}
 @media(max-width:650px){.app{display:block}.side{padding:13px 15px;border-right:0;border-bottom:1px solid var(--line);display:grid;grid-template-columns:1fr auto;gap:13px}.brand{padding:0}.brandmark{width:30px;height:30px}.brand strong{font-size:16px}.side>.button{width:auto;min-height:36px}.nav{grid-column:1/-1;display:flex;gap:5px}.navbtn{padding:9px 7px;font-size:13px;justify-content:center;gap:5px;min-height:44px}.navbtn .ico{display:none}.navbtn .count{margin:0;font-size:12px}.file-note,.side-bottom{display:none}.topbar{min-height:65px;padding:12px 15px}.topbar h1{font-size:16px}.topbar .pill{display:none}.topbar .button{font-size:12px;padding:7px 9px;min-height:38px}.topbar .ico{display:none}.actions{gap:6px}.content{padding:15px 12px;gap:13px}.sessionbar{align-items:flex-start}.sessionbar h2{font-size:16px}.session-status{font-size:12px;max-width:105px;text-align:right}.stats{gap:7px}.stat{padding:10px;min-height:92px}.stat-label,.stat-sub{font-size:12px}.stat-num{font-size:24px}.panel-head{padding:12px;gap:8px}.chart-controls{gap:5px}.chart-svg{height:210px}.chart-legend{padding-inline:12px}.legend-items{gap:8px 12px}.head-inline{gap:7px}.chart-range{padding-inline:12px;gap:10px}.result-toolbar{padding-inline:10px;gap:6px}.result-toolbar .search{flex-basis:100%}.result-toolbar select{max-width:135px}.result-table{font-size:12px}.result-table td,.result-table th{padding:10px 7px}.tag{font-size:12px;padding:2px 4px}.table-footer{padding:10px}.fields{gap:9px}.welcome{margin:35px auto;padding:22px}.welcome h2{font-size:24px}.welcome p{font-size:14px}.flow-hint{margin-top:25px;padding:18px 0;gap:12px;font-size:12px}.welcome-actions{gap:8px}.welcome-actions .button{padding:10px 15px}.import-files{flex-direction:column}.dropzone{padding:17px}.dialog-heading h2{font-size:19px}dialog{padding:20px}.export-scope{flex-direction:column;align-items:flex-start}.notice{font-size:12px}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+@media(max-width:1250px){.stats.extended{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:650px){.stats.extended{grid-template-columns:repeat(2,minmax(0,1fr))}}
