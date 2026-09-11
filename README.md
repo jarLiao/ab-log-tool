@@ -4,6 +4,8 @@
 
 这是可导入真实日志的网页工具。部署到 GitHub Pages 后，用户打开网址即可使用；无需安装客户端、注册账号或上传日志。
 
+在线使用：[AB 日志分析](https://jarliao.github.io/ab-log-tool/) · [GitHub 仓库](https://github.com/jarLiao/ab-log-tool)
+
 ## 使用
 
 1. 点击“导入日志”，选择“原始接收”“过滤之后”或“两份配对”。
@@ -60,12 +62,11 @@ npm start
 
 ## 发布到 GitHub Pages
 
-仓库尚未创建，本交付没有发布公网地址。已提供 .github/workflows/pages.yml，只上传 dist/，不会上传本地验收日志、截图或导出结果。
+本项目已发布到 [https://jarliao.github.io/ab-log-tool/](https://jarliao.github.io/ab-log-tool/)。仓库为 [jarLiao/ab-log-tool](https://github.com/jarLiao/ab-log-tool)，Pages 已选择 GitHub Actions。
 
-1. 创建用于这个工具的 GitHub 仓库，将本项目源码推送到 main 分支。
-2. 在仓库 **Settings → Pages → Build and deployment** 中选择 **GitHub Actions**。
-3. 在 **Actions** 运行 **Validate and deploy GitHub Pages**，或向 main 推送一次更新。
-4. 工作流通过引擎测试和静态检查后，发布 dist/；完成页显示访问网址。
+.github/workflows/pages.yml 会在每次向 main 推送更新时，先运行引擎测试和静态检查，再发布 dist/。也可以在 [Actions](https://github.com/jarLiao/ab-log-tool/actions/workflows/pages.yml) 手动运行 **Validate and deploy GitHub Pages**。本地验收日志、截图和导出结果不在源码提交或发布文件中。
+
+部署到另一个仓库时，将源码推送到 main，在 **Settings → Pages → Build and deployment** 中选择 **GitHub Actions**，再运行同一工作流即可。
 
 所有资源使用相对路径，适用于“用户名.github.io/仓库名/”形式的项目站点。
 
