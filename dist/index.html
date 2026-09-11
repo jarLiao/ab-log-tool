@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="在浏览器本地解析 AB 日志，查看最终缺号、乱序、重复、原文定位及原始与过滤日志差异。">
+  <meta name="color-scheme" content="light">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob:; script-src 'self'; worker-src blob:; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>AB 日志分析</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./style.css">
+  <script src="./engine.js" defer></script>
+  <script src="./worker.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+<svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 3v17h17M7 15l4-6 4 3 5-8"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h6"/></symbol>
+  <symbol id="i-compare" viewBox="0 0 24 24"><path d="M4 7h16m-4-4 4 4-4 4M20 17H4m4-4-4 4 4 4"/></symbol>
+  <symbol id="i-import" viewBox="0 0 24 24"><path d="M4 15v6h16v-6M12 3v12m-5-5 5 5 5-5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+</defs></svg>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><span class="brandmark">AB</span><strong>日志分析</strong></div>
+    <button id="newTask" class="button primary wide"><svg class="ico"><use href="#i-import"/></svg>导入日志</button>
+    <nav class="nav" aria-label="分析视图">
+      <button class="navbtn active" data-mode="raw" disabled><svg class="ico"><use href="#i-file"/></svg>原始接收<span id="rawCount" class="count">—</span></button>
+      <button class="navbtn" data-mode="filtered" disabled><svg class="ico"><use href="#i-file"/></svg>过滤之后<span id="filteredCount" class="count">—</span></button>
+      <button class="navbtn" data-mode="pair" disabled><svg class="ico"><use href="#i-compare"/></svg>配对比较</button>
+    </nav>
+    <div id="sourceNote" class="file-note">导入一份日志独立分析，或导入同一次连接的两份日志进行比较。</div>
+    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>刷新或关闭页面后清除</span><span class="version">v1.0 · 网页工具</span></div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-left"><h1>AB 日志分析</h1><span class="pill">本地处理</span></div>
+      <div class="actions"><button id="aboutBtn" class="button"><svg class="ico"><use href="#i-info"/></svg>判定说明</button><button id="exportBtn" class="button primary" disabled>导出结果</button></div>
+    </header>
+    <section id="welcome" class="welcome">
+      <div class="welcome-mark"><svg class="ico"><use href="#i-chart"/></svg></div>
+      <h2>从日志里找到序号异常</h2>
+      <p>导入 AndroidTool 的 abBle 或 abFilter 文件，查看缺号、乱序、重复，并定位原始报文。</p>
+      <div class="welcome-actions"><button id="welcomeImport" class="button primary">选择日志文件</button><button id="demoBtn" class="button">体验演示</button></div>
+      <div class="flow-hint"><span>1  导入日志</span><span>2  图表与异常联动查看</span><span>3  导出明细和原文</span></div>
+      <p class="subtle">支持单份或一组配对日志 · 全命令共用序号 · 同一次连续连接</p>
+    </section>
+    <div id="workspace" class="content" hidden>
+      <div class="sessionbar"><div><h2 id="viewTitle"></h2><p id="fileDescription"></p></div><span id="sessionStatus" class="session-status"></span></div>
+      <div id="qualityNote" class="notice" hidden></div>
+      <section id="stats" class="stats" aria-label="分析统计"></section>
+      <section class="panel chart-panel" aria-label="序号变化图">
+        <div class="panel-head"><div class="head-inline"><h3>序号变化</h3><span id="chartSubtitle" class="small"></span></div>
+          <div class="chart-controls"><select id="chartSide" aria-label="图表日志来源" hidden><option value="raw">原始接收</option><option value="filtered">过滤之后</option></select><button id="zoomIn" class="button compact" aria-label="放大图表">＋</button><button id="zoomOut" class="button compact" aria-label="缩小图表">−</button><div class="segmented"><button id="focusBtn" class="active">异常附近</button><button id="fullBtn">查看全程</button></div></div>
+        </div>
+        <div class="chart-body"><svg id="chart" class="chart-svg" role="group" aria-label="按接收顺序展示序号；标记可点击，异常列表提供文字与键盘访问"></svg></div>
+        <div class="chart-legend"><div class="legend-items"><span>— 序号</span><span class="gap-text">△ 缺号</span><span class="reorder-text">◇ 乱序</span><span class="duplicate-text">□ 重复</span><span class="collision-text">× 同号异内容</span><span>│ 正常回绕 / 待核对分段</span></div><span id="chartHint"></span></div>
+        <div class="chart-range"><label for="chartPan">移动查看范围</label><input id="chartPan" type="range" min="0" max="1000" value="0" aria-label="移动图表查看范围"></div>
+      </section>
+      <div class="workbench">
+        <section class="panel result-panel" aria-label="异常和差异列表">
+          <div class="panel-head"><div class="head-inline"><h3 id="resultTitle">异常列表</h3><span id="resultCount" class="pill"></span></div><div class="actions"><button id="prevBtn" class="button compact" aria-label="上一条记录"><svg class="ico"><use href="#i-left"/></svg></button><button id="nextBtn" class="button compact" aria-label="下一条记录"><svg class="ico"><use href="#i-right"/></svg></button></div></div>
+          <div class="result-toolbar"><label class="search"><svg class="ico"><use href="#i-search"/></svg><input id="search" type="search" aria-label="搜索序号、源行、时间或命令" placeholder="序号 / L行号 / 时间 / 命令"></label><select id="kindFilter" aria-label="记录类型"></select><select id="commandFilter" aria-label="命令筛选"><option value="">全部命令</option></select><button id="moreFilter" class="button compact" aria-expanded="false">更多筛选</button></div>
+          <div id="extraFilters" class="extra-filters" hidden><label>起始时间<input id="timeFrom" type="datetime-local" step="0.001"></label><label>结束时间<input id="timeTo" type="datetime-local" step="0.001"></label><label id="coverageLabel" hidden>覆盖范围<select id="coverageFilter"><option value="all">全部范围</option><option value="inside">共有范围内</option><option value="outside">共有范围外</option><option value="unknown">无共有范围</option></select></label><button id="resetFilter" class="button compact">清除筛选</button><span class="small">时间为北京时间；筛选只影响展示</span></div>
+          <div class="table-wrap"><table class="result-table"><thead><tr><th>类型</th><th>序号 / 范围</th><th id="countHead">数量</th><th>源行</th></tr></thead><tbody id="eventRows"></tbody></table><div class="empty" id="empty" hidden></div></div>
+          <div class="table-footer"><span id="listFooter"></span><div class="pagination"><button id="pagePrev" class="button compact" aria-label="上一页">上一页</button><span id="pageInfo"></span><button id="pageNext" class="button compact" aria-label="下一页">下一页</button></div></div>
+        </section>
+        <section class="panel inspector" aria-label="异常详情和原文">
+          <div class="panel-head"><h3>原文定位</h3><span class="pill mono" id="eventID">—</span></div>
+          <div class="inspector-summary"><h3 id="detailTitle">选择一条记录</h3><p id="detailSummary"></p></div>
+          <div class="fields" id="fields"></div>
+          <div class="raw-header"><span id="contextTitle">相关原始片段</span><button id="copyBtn" class="button compact" disabled>复制片段</button></div>
+          <div class="code-sections" id="codeSections"></div>
+          <div class="context-note" id="contextNote"></div>
+        </section>
+      </div>
+      <footer class="footbar"><span id="coverage"></span><span>保持源行顺序 · 所有命令共用序号</span></footer>
+    </div>
+  </main>
+</div>
+<dialog id="importDialog" class="import-dialog">
+  <div class="dialog-heading"><h2>导入日志</h2><button class="button compact" data-close aria-label="关闭导入窗口">关闭</button></div>
+  <div class="import-types" role="group" aria-label="分析方式"><button class="button active" data-input="raw">原始接收</button><button class="button" data-input="filtered">过滤之后</button><button class="button" data-input="pair">两份配对</button></div>
+  <p class="dialog-note" id="importDescription">选择 abBle 原始接收日志。每份文件按同一次连续连接分析。</p>
+  <div class="import-files">
+    <label id="rawDrop" class="dropzone" tabindex="0"><svg class="ico"><use href="#i-file"/></svg><strong>原始接收日志</strong><span>点击选择，或拖入 abBle 文件</span><input type="file" id="rawFile" accept=".txt,.log,text/plain"><b id="rawFileName">尚未选择文件</b></label>
+    <label id="filteredDrop" class="dropzone" tabindex="0" hidden><svg class="ico"><use href="#i-file"/></svg><strong>过滤后日志</strong><span>点击选择，或拖入 abFilter 文件</span><input type="file" id="filteredFile" accept=".txt,.log,text/plain"><b id="filteredFileName">尚未选择文件</b></label>
+  </div>
+  <p class="small">文件在本机处理。支持 UTF-8、UTF-16、GB18030 编码；每份最多 128 MB。</p>
+  <p id="importError" class="error-text" role="alert" hidden></p>
+  <div class="dialog-actions"><button class="button" data-close>取消</button><button id="analyzeBtn" class="button primary">开始分析</button></div>
+</dialog>
+<dialog id="progressDialog"><h2 id="progressTitle">正在分析日志</h2><p id="progressText" class="dialog-note">读取文件…</p><progress id="progress" max="100" value="0"></progress><div class="progress-caption"><span id="progressPercent">0%</span><span>可以随时取消</span></div><div class="dialog-actions"><button id="cancelAnalysis" class="button">取消分析</button></div></dialog>
+<dialog id="exportDialog"><div class="dialog-heading"><h2>导出分析结果</h2><button class="button compact" data-close>关闭</button></div><p id="exportScope" class="dialog-note"></p>
+  <label class="export-scope">导出范围<select id="exportRange"><option value="all">全部文件异常与配对差异</option><option value="filtered">仅当前视图与筛选</option></select></label>
+  <button class="button export-choice" id="csvBtn"><svg class="ico"><use href="#i-file"/></svg><span><strong>异常明细 CSV</strong><small>中文表头，包含序号、时间、源行和异常说明</small></span></button>
+  <button class="button export-choice" id="txtBtn"><svg class="ico"><use href="#i-file"/></svg><span><strong>原始日志片段 TXT</strong><small>每条异常附关联记录前后各 5 行</small></span></button>
+  <p class="small">导出以完整文件的分析结论为准，筛选不会重新计算缺号。</p>
+</dialog>
+<dialog id="aboutDialog"><div class="dialog-heading"><h2>判定说明</h2><button class="button compact" data-close>关闭</button></div>
+  <ul class="rules"><li>按源日志的记录顺序分析，所有命令共用一个 16 位序号。</li><li>先跳号、后补到的报文列为“乱序补到”；只有完整分析后仍未出现的序号列为“最终缺号”。文件首尾范围之外不补缺号。</li><li>同一周期同号且完整帧相同为重复；同号但内容不同单独列示。65535 → 0 为正常回绕。</li><li>周期按距离最近的序号推进方向解释。恰好相差半周期，或向当前观测范围之前倒退超过 4096 个序号时，列为“跨度待核对”，不推算跨段缺号。较小范围的开头补到仍参与同段统计。日志必须来自同一次连续连接；跨多次回绕的极端迟到或跨度无法仅凭序号唯一还原。</li><li>支持分片与一行多帧。只有完整帧且 CRC16 校验通过的序号参与统计。无法解析的记录保留原文。</li><li>缺号描述本日志的缺口，不直接等于蓝牙丢包。过滤后的缺号可能来自正常过滤。</li><li>配对依据原始接收时间戳与完整帧，逐次匹配，并显示出现次数及顺序差异；相同时间戳、相同帧的重复对应关系列为待核对。比较只呈现事实，不推测过滤原因。</li><li>图表概览保留每段最高与最低点，同位置的异常标记显示数量。放大或从列表逐条查看；所有异常均参与统计和导出。</li><li>文件保留在当前页面的内存中。没有日志上传、在线接口或外部统计；刷新或关闭页面后清除。</li></ul>
+  <p class="small">日志格式：毫秒时间戳,十六进制报文。命令取消息体首字节，Key 仅展示消息体偏移 2 的可用值，具体含义以命令结构为准。</p>
+</dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<noscript><p>请启用 JavaScript 后使用本地日志分析功能。</p></noscript>
+</body>
+</html>

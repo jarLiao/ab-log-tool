@@ -1,0 +1,12 @@
+{
+  "name": "ab-log-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "在浏览器本地分析 AB 协议日志",
+  "scripts": {
+    "test": "node --test tests/engine.test.cjs",
+    "check": "node scripts/check.cjs",
+    "start": "node scripts/serve.cjs"
+  },
+  "engines": { "node": ">=20" }
+}

@@ -1,0 +1,13 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const root = path.resolve(__dirname,'../dist');
+const files=fs.readdirSync(root),html=fs.readFileSync(path.join(root,'index.html'),'utf8');
+for(const match of html.matchAll(/(?:src|href)="(\.\/[^"]+)"/g)) assert.ok(fs.existsSync(path.resolve(root,match[1])),'Missing asset '+match[1]);
+for(const file of files.filter(f=>f.endsWith('.js'))) new vm.Script(fs.readFileSync(path.join(root,file),'utf8'),{filename:file});
+assert.ok(html.includes("connect-src 'none'"));
+assert.ok(!/https?:\/\//.test(html.replace(/http:\/\/www.w3.org\/2000\/svg/g,'')));
+assert.ok(!html.includes('1776063289623'),'Private sample must not be baked into the deployment');
+assert.ok(files.includes('.nojekyll'));
+console.log('静态入口、相对资源、JavaScript 语法与本地处理约束检查通过。');
