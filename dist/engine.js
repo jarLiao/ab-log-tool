@@ -3,10 +3,11 @@
   'use strict';
   function createEngine() {
     const MOD = 65536, HALF = 32768, LEADING_BACKFILL_LIMIT = 4096;
-    const ROLLBACK_MIN_RUN = 4, ROLLBACK_LOOKAHEAD = 8, ROLLBACK_MIN_CONFLICTS = 3;
+    const BOUNDARY_MIN_RUN = 4, BOUNDARY_LOOKAHEAD = 8, BOUNDARY_MIN_CONFLICTS = 3;
+    // Keep the legacy "rollback" ID for filters; a boundary does not prove direction.
     const names = {
       gap: '最终缺号', reorder: '乱序补到', duplicate: '重复记录',
-      collision: '同号不同内容', parse: '解析 / 校验异常', uncertain: '序号跨度待核对', rollback: '持续回退待核对',
+      collision: '同号不同内容', parse: '解析 / 校验异常', uncertain: '序号跨度待核对', rollback: '序号跳变待核对',
       rawOnly: '仅原始日志有', filteredOnly: '仅过滤日志有',
       pairOrder: '共有帧顺序差异', pairUncertain: '配对待核对', matched: '双方都有', record: '报文记录', logLine: '原始日志行'
     };
@@ -179,15 +180,15 @@
       const forwardRuns = new Uint32Array(rows.length);
       for (let i = rows.length - 1; i >= 0; i--) forwardRuns[i] = 1 +
         (i + 1 < rows.length && mod(rows[i + 1].sid - rows[i].sid) === 1 ? forwardRuns[i + 1] : 0);
-      function rollbackEvidence(i, ext) {
-        if (!i || ext >= high || mod(rows[i].sid - rows[i - 1].sid) <= HALF || forwardRuns[i] < ROLLBACK_MIN_RUN) return null;
+      function boundaryEvidence(i, ext) {
+        if (!i || ext >= high || mod(rows[i].sid - rows[i - 1].sid) <= HALF || forwardRuns[i] < BOUNDARY_MIN_RUN) return null;
         let conflicts = 0;
-        for (let j = 0; j < Math.min(forwardRuns[i], ROLLBACK_LOOKAHEAD); j++) {
+        for (let j = 0; j < Math.min(forwardRuns[i], BOUNDARY_LOOKAHEAD); j++) {
           const previousIndex = seen.get(ext + j), candidate = rows[i + j];
           if (previousIndex != null && rows[previousIndex].hex !== candidate.hex && !variants.get(ext + j)?.has(candidate.hex)) conflicts++;
         }
         const beyondStart = ext < low && high - ext > LEADING_BACKFILL_LIMIT;
-        return beyondStart || conflicts >= ROLLBACK_MIN_CONFLICTS ? {runLength: forwardRuns[i], conflicts} : null;
+        return beyondStart || conflicts >= BOUNDARY_MIN_CONFLICTS ? {runLength: forwardRuns[i], conflicts} : null;
       }
       const event = (kind, r, extra = {}) => ({kind, source: s.side, index: r.index, line: r.line, endLine: r.endLine,
         t: r.t, sid: r.sid, cmd: r.cmd, key: r.key, cycle: r.cycle, segment: r.segment, ...extra});
@@ -225,21 +226,26 @@
         // Short late arrivals can precede the first logged frame. Expand the observed span
         // so a frame already present at the beginning never becomes a spurious final gap.
         // A large backwards extension has no prior-cycle anchor; leave that span unresolved.
-        const rollback = rollbackEvidence(i, ext);
+        const boundary = boundaryEvidence(i, ext);
         const ambiguous = i && (Math.abs(ext - high) === HALF || ext < low - LEADING_BACKFILL_LIMIT);
-        if (rollback || ambiguous) {
+        if (boundary || ambiguous) {
           finishSegment(i - 1);
-          const p = rows[i - 1], kind = rollback ? 'rollback' : 'uncertain';
+          const p = rows[i - 1], kind = boundary ? 'rollback' : 'uncertain';
+          const numericDelta = r.sid - p.sid, forwardDistance = mod(numericDelta), backwardDistance = mod(-numericDelta);
+          const numericChange = numericDelta > 0 ? '数值增大 ' + numericDelta : numericDelta < 0 ? '数值减小 ' + (-numericDelta) : '数值相同';
+          const directionHint = numericDelta > 0 || Math.abs(numericDelta) === HALF ? '方向待核对' : '原因待核对';
           seen = new Map(); variants = new Map(); low = high = ext = r.sid; highRow = r; segment++;
           segmentStart = i;
           r.segment = segment; r.cycle = 0; r.boundaryKind = kind;
           events.push(event(kind, r, {relatedIndex: p.index, relatedSource: s.side,
             relatedLine: p.line, relatedEndLine: p.endLine, previousSid: p.sid,
-            backwardBy: rollback ? mod(p.sid - r.sid) : null, runLength: rollback?.runLength,
-            reason: rollback ? '序号从 ' + hexWord(p.sid) + '（DEC ' + p.sid + '）回退到 ' + hexWord(r.sid) +
-              '（DEC ' + r.sid + '），从此处起有 ' + rollback.runLength + ' 条连续递增记录。可能涉及序号重置、重用或数据重放，不能直接认定为迟到补包。已划分第 ' +
-              segment + ' 段；仅统计各段内部，段间待核对，无法据此确定跨段缺失数量。' :
-              '无法可靠区分较大跳号、早到日志边界之外的迟到帧或周期变化。此处划分新的可分析段，仅统计段内，段间待核对。'}));
+            numericDelta, numericChange, forwardDistance, backwardDistance, directionHint, runLength: boundary?.runLength,
+            reason: '序号从 ' + hexWord(p.sid) + '（DEC ' + p.sid + '）变为 ' + hexWord(r.sid) +
+              '（DEC ' + r.sid + '），' + numericChange + '。' + (directionHint === '方向待核对' ?
+                '按 16 位循环序号，候选解释为向前跨越 ' + forwardDistance + ' 或向后跨越 ' + backwardDistance + '；仅凭序号不能确认方向，不能把较短距离当作实际回退。' :
+                '这描述的是前后记录的数值变化，不能据此确认设备重启、重置或数据重放。') +
+              (boundary ? '从此处起有 ' + boundary.runLength + ' 条连续递增记录。' : '周期归属尚不确定。') +
+              '暂划分第 ' + segment + ' 段；只统计各段内部，段间待核对，跨段缺失数量未知。'}));
         }
         r.ext = ext; r.segment = segment; r.cycle = Math.floor(ext / MOD);
         low = Math.min(low, ext);
@@ -336,8 +342,8 @@
         wraps: s.wraps, segments: s.segments, segmentRanges: s.segmentRanges};
     }
     function title(e) { return names[e.kind] || e.kind; }
-    function label(e) { return e.kind === 'rollback' ? e.previousSid + ' → ' + e.sid : e.kind === 'gap' ? e.from === e.to ? String(e.from) : e.from + '–' + e.to : e.sid == null ? '—' : String(e.sid); }
-    function hexLabel(e) { return e.kind === 'rollback' ? hexWord(e.previousSid) + ' → ' + hexWord(e.sid) : e.kind === 'gap' ? e.from === e.to ? hexWord(e.from) : hexWord(e.from) + '–' + hexWord(e.to) : hexWord(e.sid) || '—'; }
+    function label(e) { return e.previousSid != null ? e.previousSid + ' → ' + e.sid : e.kind === 'gap' ? e.from === e.to ? String(e.from) : e.from + '–' + e.to : e.sid == null ? '—' : String(e.sid); }
+    function hexLabel(e) { return e.previousSid != null ? hexWord(e.previousSid) + ' → ' + hexWord(e.sid) : e.kind === 'gap' ? e.from === e.to ? hexWord(e.from) : hexWord(e.from) + '–' + hexWord(e.to) : hexWord(e.sid) || '—'; }
     function dualLabel(e) { return hexLabel(e) + '（DEC ' + label(e) + '）'; }
     function descriptions(e, data) {
       let text = e.reason || '';
@@ -358,7 +364,7 @@
         if (filter.from && (e.t == null || e.t < Number(filter.from))) return false;
         if (filter.to && (e.t == null || e.t > Number(filter.to))) return false;
         if (filter.coverage && filter.coverage !== 'all' && e.coverage !== filter.coverage) return false;
-        return !q || (numeric != null && (e.sid === numeric || e.kind === 'rollback' && e.previousSid === numeric || e.kind === 'gap' && numeric >= e.from && numeric <= e.to)) ||
+        return !q || (numeric != null && (e.sid === numeric || e.previousSid === numeric || e.kind === 'gap' && numeric >= e.from && numeric <= e.to)) ||
           [e.id, title(e), label(e), 'L' + e.line, 'L' + e.endLine, timestamp(e.t), hexByte(e.cmd), hexByte(e.key), data[e.source].name]
             .some(v => String(v).toLowerCase().includes(q));
       });
@@ -485,28 +491,30 @@
       }
       const wraps = [];
       for (let i = lo; i <= hi; i++) if (rows[i].wrap || i > 0 && rows[i].segment !== rows[i - 1].segment) wraps.push({
-        index: i, sid: rows[i].sid, label: rows[i].wrap ? '正常回绕' : rows[i].boundaryKind === 'rollback' ? '序号回退 · 待核对分段' : '待核对分段'});
+        index: i, sid: rows[i].sid, label: rows[i].wrap ? '正常回绕' : rows[i].boundaryKind === 'rollback' ? '序号跳变 · 待核对分段' : '待核对分段'});
       return {points, markers: [...grouped.values()], wraps, total: rows.length, side, lo, hi};
     }
     function exportParts(data, events, type, scope = '全部结果') {
       const cell = value => {
         let s = String(value ?? '');
         // Spreadsheet-safe for untrusted filenames and text beginning with a formula prefix.
-        if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+        if (typeof value !== 'number' && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
         return '"' + s.replace(/"/g, '""') + '"';
       };
       if (type === 'csv') {
         const out = ['\uFEFF' + ['异常编号', '记录类型', '来源文件', '起始行', '结束行', '关联文件', '关联起始行', '关联结束行',
           '接收时间', '毫秒时间戳', '消息序号', '命令', 'Key', '可分析段', '序号周期', '缺号起始', '缺号结束', '缺号数量', '覆盖范围', '说明', '导出范围',
-          '消息序号HEX', '序号原始字节LE', '缺号起始HEX', '缺号结束HEX', '回退前序号', '回退前序号HEX', '回退幅度', '统计口径'].map(cell).join(',') + '\r\n'];
+          '消息序号HEX', '序号原始字节LE', '缺号起始HEX', '缺号结束HEX', '前一报文序号', '前一报文序号HEX', '序号数值变化', '统计口径',
+          '判定提示', '候选向前跨度', '候选向后跨度'].map(cell).join(',') + '\r\n'];
         let chunk = '';
         for (const e of events) {
           chunk += [e.id, title(e), data[e.source].name, e.line, e.endLine, e.relatedSource ? data[e.relatedSource].name : '',
             e.relatedLine, e.relatedEndLine, timestamp(e.t), e.t, e.sid, hexByte(e.cmd), hexByte(e.key), e.segment, e.cycle,
             e.from, e.to, e.count, e.coverage === 'inside' ? '共有范围内' : e.coverage === 'outside' ? '共有范围外' : e.coverage === 'unknown' ? '无共有范围' : '',
             descriptions(e, data), scope, hexWord(e.sid), sequenceBytes(e.sid), hexWord(e.from), hexWord(e.to),
-            e.kind === 'rollback' ? e.previousSid : '', e.kind === 'rollback' ? hexWord(e.previousSid) : '', e.backwardBy,
-            data[e.source].segments > 1 ? '按段统计；段间待核对' : '单段统计'].map(cell).join(',') + '\r\n';
+            e.previousSid, hexWord(e.previousSid), e.numericDelta,
+            data[e.source].segments > 1 ? '按段统计；段间待核对' : '单段统计', e.directionHint,
+            e.forwardDistance, e.backwardDistance].map(cell).join(',') + '\r\n';
           if (chunk.length > 262144) { out.push(chunk); chunk = ''; }
         }
         if (chunk) out.push(chunk);

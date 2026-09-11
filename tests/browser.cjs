@@ -117,8 +117,8 @@ async function importTask(page,mode,raw,filtered){
       ok('Rollback card filters all six reviewable boundaries',await page.locator('#kindFilter').inputValue()==='rollback');
       ok('Boundary detail shows before and after IDs instead of calling them late arrivals',(await page.locator('#detailTitle').innerText()).includes('0xD848 → 0xBB71'));
       ok('Both original counter byte anchors remain exact and preserve lowercase source text',JSON.stringify(await page.locator('.seq-byte-mark').allTextContents())===JSON.stringify(['71','bb','48','d8']));
-      ok('Boundary retains adjacent original lines and a cautious cause description',(await page.locator('#codeSections').innerText()).includes('L12960')&&(await page.locator('#codeSections').innerText()).includes('L12962')&&(await page.locator('#detailSummary').innerText()).includes('可能涉及'));
-      ok('Chart breaks the line at the rollback boundary',((await page.locator('#chart > path').getAttribute('d')).match(/M/g)||[]).length===2&&(await page.locator('#chart').innerHTML()).includes('序号回退 · 待核对分段'));
+      ok('Boundary retains adjacent original lines and a cautious cause description',(await page.locator('#codeSections').innerText()).includes('L12960')&&(await page.locator('#codeSections').innerText()).includes('L12962')&&(await page.locator('#detailSummary').innerText()).includes('不能据此确认'));
+      ok('Chart breaks the line at the uncertain boundary',((await page.locator('#chart > path').getAttribute('d')).match(/M/g)||[]).length===2&&(await page.locator('#chart').innerHTML()).includes('序号跳变 · 待核对分段'));
       await page.locator('#sequenceBase').selectOption('dec');
       ok('Decimal mode also shows both boundary anchors',(await page.locator('#detailTitle .seq-primary').innerText())==='55368 → 47985');
       await page.locator('#search').fill('0xD848');
@@ -136,7 +136,7 @@ async function importTask(page,mode,raw,filtered){
       await page.locator('#exportBtn').click();
       const csvDownload=page.waitForEvent('download');await page.locator('#csvBtn').click();const csvFile=await csvDownload;
       const csvPath=path.join(out,'rollback.csv');await csvFile.saveAs(csvPath);const csv=fs.readFileSync(csvPath,'utf8');
-      ok('Rollback CSV downloads all six boundaries with before IDs and conditional scope',csv.split('\r\n').filter(Boolean).length===7&&csv.includes('回退前序号HEX')&&csv.includes('0xD848')&&csv.includes('按段统计；段间待核对'));
+      ok('Boundary CSV downloads all six boundaries with before IDs and conditional scope',csv.split('\r\n').filter(Boolean).length===7&&csv.includes('前一报文序号HEX')&&csv.includes('0xD848')&&csv.includes('按段统计；段间待核对'));
       const txtDownload=page.waitForEvent('download');await page.locator('#txtBtn').click();const txtFile=await txtDownload;
       const txtPath=path.join(out,'rollback-context.txt');await txtFile.saveAs(txtPath);const txt=fs.readFileSync(txtPath,'utf8');
       ok('Rollback TXT downloads actual source anchors and unresolved continuity',txt.includes('7 个可分析段')&&txt.includes('缺号为 0 不代表整份日志完整')&&txt.includes('L12960')&&txt.includes('L12962'));

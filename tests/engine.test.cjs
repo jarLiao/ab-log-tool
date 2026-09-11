@@ -150,15 +150,50 @@ test('rollback reports, search and chart retain both boundary anchors and condit
   assert.equal(E.selectEvents(data,'raw',{query:'10003'}).length,1);
   assert.equal(E.selectEvents(data,'raw',{query:'0x0064'}).length,1);
   assert.ok(E.hexLabel(e).includes('0x2713')); assert.ok(E.hexLabel(e).includes('0x0064'));
-  assert.ok(E.chart(data,'raw',{},{}).wraps.some(w=>w.label.includes('回退')));
+  assert.ok(E.chart(data,'raw',{},{}).wraps.some(w=>w.label.includes('跳变')));
   const csv=E.exportParts(data,s.events,'csv').join(''),txt=E.exportParts(data,s.events,'txt').join('');
-  assert.ok(csv.includes('回退前序号HEX')); assert.ok(csv.includes('段间待核对'));
+  assert.ok(csv.includes('前一报文序号HEX')); assert.ok(csv.includes('段间待核对'));
   assert.ok(txt.includes('段间待核对')); assert.ok(txt.includes('0x2713'));
 });
 
 test('normal rollover is continuous even when content changes', () => {
   const s=parse([frame(65534),frame(65535,[0x7b,3,1,1]),frame(0,[0x7b,3,1,2]),frame(1)]);
   zeros(s); assert.equal(s.wraps,1); assert.equal(s.segments,1);
+});
+
+test('ascending large jump is an unresolved boundary, not a confirmed rollback', () => {
+  // Reproduce the visible sequence pattern, without using or embedding the source log.
+  const runs=[[50752,24277],[47995,330],[47996,2220]];
+  const s=parse(runs.flatMap(([sid,count],i)=>series(sid,count,i))),events=kinds(s,'rollback');
+  assert.equal(s.counts.frames,26827); assert.equal(s.segments,3); assert.equal(events.length,2);
+  assert.equal(s.counts.gap,0); assert.equal(s.counts.reorder,0); assert.equal(s.counts.collision,0);
+  const [up,down]=events;
+  assert.deepEqual([up.previousSid,up.sid,up.numericDelta,up.forwardDistance,up.backwardDistance],[9492,47995,38503,38503,27033]);
+  assert.equal(up.directionHint,'方向待核对'); assert.equal(up.backwardBy,undefined);
+  assert.equal(E.title(up),'序号跳变待核对');
+  assert.ok(up.reason.includes('数值增大 38503')); assert.ok(up.reason.includes('不能确认方向')); assert.ok(!up.reason.includes('回退到'));
+  assert.deepEqual([down.previousSid,down.sid,down.numericDelta],[48324,47996,-328]);
+  assert.equal(down.directionHint,'原因待核对'); assert.ok(down.reason.includes('数值减小 328'));
+});
+
+test('a half-cycle ambiguity exposes both real anchors and equal candidate distances', () => {
+  const s=parse([0,32768]),e=kinds(s,'uncertain')[0];
+  assert.equal(e.forwardDistance,32768); assert.equal(e.backwardDistance,32768);
+  assert.equal(e.directionHint,'方向待核对'); assert.equal(E.hexLabel(e),'0x0000 → 0x8000');
+  assert.equal(E.selectEvents({raw:s},'raw',{query:'0x0000'})[0],e);
+});
+
+test('boundary exports separate signed observed change from hypothetical distances', () => {
+  const s=parse([...series(9492,1),...series(47995,330),...series(47996,4,2)]),data={raw:s};
+  const events=s.events.filter(e=>e.previousSid!=null);
+  const csv=E.exportParts(data,events,'csv').join(''),txt=E.exportParts(data,events,'txt').join('');
+  const rows=csv.trim().replace(/^\uFEFF/,'').split('\r\n').map(line=>line.slice(1,-1).split('","').map(cell=>cell.replace(/""/g,'"')));
+  const header=rows.shift(),field=(row,name)=>row[header.indexOf(name)];
+  assert.ok(!header.includes('回退幅度')); assert.ok(!header.includes('回退前序号'));
+  assert.equal(field(rows[0],'序号数值变化'),'38503'); assert.equal(field(rows[0],'候选向后跨度'),'27033');
+  assert.equal(field(rows[0],'判定提示'),'方向待核对');
+  assert.equal(field(rows[1],'序号数值变化'),'-328'); assert.equal(field(rows[1],'统计口径'),'按段统计；段间待核对');
+  assert.ok(txt.includes('数值增大 38503')); assert.ok(txt.includes('不能确认方向')); assert.ok(!txt.includes('回退到'));
 });
 
 test('normal record inspection exposes its own command and key without adding anomalies', () => {

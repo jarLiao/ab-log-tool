@@ -70,7 +70,7 @@
     document.querySelectorAll('[data-input]').forEach(b => { b.classList.toggle('active', b.dataset.input === m); b.setAttribute('aria-pressed', String(b.dataset.input === m)); });
     $('rawDrop').hidden = m === 'filtered'; $('filteredDrop').hidden = m === 'raw';
     $('importDescription').textContent = m === 'pair' ? '选择同一设备、同一次连续连接的原始日志和过滤后日志。' :
-      m === 'filtered' ? '选择 abFilter 过滤后日志。缺号可能来自正常过滤。' : '选择同一设备的 abBle 原始接收日志。持续序号回退会分段并标记待核对。';
+      m === 'filtered' ? '选择 abFilter 过滤后日志。缺号可能来自正常过滤。' : '选择同一设备的 abBle 原始接收日志。无法确认连续性的序号跳变会分段并标记待核对。';
     $('importError').hidden = true;
   }
   function chooseFile(side, file) {
@@ -162,11 +162,11 @@
       const items = [['有效报文', c.frames, num(s.diagnostics) + ' 行诊断文字'], [s.segments > 1 ? '段内最终缺号' : '最终缺号', c.gap, s.segments > 1 ? '段间数量待核对' : num(c.gapRanges) + ' 个区间', 'gap', 'alert'],
         ['乱序补到', c.reorder, '已从缺号中移除', 'reorder'], ['重复记录', c.duplicate, '完整帧相同', 'duplicate'],
         ['同号不同内容', c.collision, s.segments > 1 ? '各段内部核对' : '单独核对', 'collision', 'special'], ['解析异常', c.parse, '保留原始证据', 'parse', c.parse ? 'alert' : '']];
-      if (c.rollback) items.splice(2, 0, ['序号回退', c.rollback, '点击查看待核对边界', 'rollback', 'alert']);
+      if (c.rollback) items.splice(2, 0, ['跳变待核对', c.rollback, '处边界，非丢包数量', 'rollback', 'alert']);
       stats(items);
       $('coverage').textContent = c.frames ? '覆盖 ' + shortTime(s.minTime) + '–' + shortTime(s.maxTime) + '（北京时间） · ' + s.wraps + ' 次回绕 · ' + s.segments + ' 个可分析段' : '没有可参与序号分析的完整有效报文';
       if (m === 'filtered') notices.push('过滤日志的缺号可能来自正常过滤，请结合原始日志核对。');
-      if (c.rollback) notices.push(c.rollback + ' 处持续回退待核对，已划分 ' + s.segments + ' 个分析段。段内缺号为 0 不代表整份日志完整；段间是否缺失、是否重置或重放，需要核对设备记录。');
+      if (c.rollback) notices.push(c.rollback + ' 处序号跳变待核对，暂划分 ' + s.segments + ' 个分析段。跳变处数不是丢包数量；段内缺号为 0 不代表整份日志完整，段间连续性需要核对设备记录。');
       if (c.uncertain) notices.push(c.uncertain + ' 处序号跨度待核对；段内最终缺号不含跨段未决范围，可在类型筛选中查看。');
       if (s.segments > 1) {
         $('segmentSummary').hidden = false;
@@ -333,6 +333,7 @@
     const fields = [['源行范围', 'L' + e.line + (e.endLine !== e.line ? '–L' + e.endLine : '')],
       ['接收时间', E.timestamp(e.t) || '—'], ['命令 / Key', d.frame ? (d.frame.cmd || '—') + ' / ' + (d.frame.key || '—') : '— / —'],
       ['可分析段 / 序号周期', d.frame ? d.frame.segment + ' / ' + d.frame.cycle : '—']];
+    if (e.previousSid != null) fields.push(['观测到的数值变化', e.numericChange], ['判定状态', e.directionHint]);
     $('fields').innerHTML = fields.map(([a, b]) => '<div class="field"><span>' + a + '</span><strong class="mono">' + esc(b) + '</strong></div>').join('');
     contextText = '[' + e.id + '] ' + E.title(e) + ' ' + E.dualLabel(e) + '\n' + d.description + '\n\n' +
       d.sections.map(s => s.name + '\n' + (s.frame ? '原文字节 ' + s.frame.seqBytes + ' → ' + s.frame.sidHex + ' = DEC ' + s.frame.sid + '（小端）\n' : '') +
