@@ -161,6 +161,45 @@ test('normal rollover is continuous even when content changes', () => {
   zeros(s); assert.equal(s.wraps,1); assert.equal(s.segments,1);
 });
 
+test('normal record inspection exposes its own command and key without adding anomalies', () => {
+  const s=parse([frame(100,[0x7b,3,0x11,0]),frame(101,[0x01,3,0x15,0])]);
+  const before=JSON.stringify(s.counts), inspected=E.inspect({raw:s},{source:'raw',index:1});
+  assert.equal(inspected.detail.frame.sid,101); assert.equal(inspected.detail.frame.cmd,'0x01'); assert.equal(inspected.detail.frame.key,'0x15');
+  assert.equal(inspected.detail.frame.index,1); assert.equal(inspected.detail.frame.total,2);
+  assert.equal(inspected.detail.sections[0].line,2); assert.equal(JSON.stringify(s.counts),before); assert.equal(s.events.length,0);
+});
+
+test('line selection resolves all frames on one line and keeps fragmented frame identity', () => {
+  const a=frame(100),b=frame(101,[0x01,3,0x16,0]);
+  const s=E.parse(base+','+a.slice(0,14)+'\nerror between fragments\n'+(base+1)+','+a.slice(14)+b);
+  assert.deepEqual(E.framesAtLine(s,3).map(r=>r.sid),[100,101]);
+  assert.equal(E.inspect({raw:s},{source:'raw',line:3,index:0}).detail.frame.sid,100);
+  const chosen=E.inspect({raw:s},{source:'raw',line:3,index:1});
+  assert.equal(chosen.detail.frame.sid,101); assert.equal(chosen.detail.frame.key,'0x16');
+  assert.deepEqual(chosen.detail.choices.map(r=>r.index),[0,1]);
+  assert.equal(E.inspect({raw:s},{source:'raw',line:2}).detail.frame,null);
+});
+
+test('diagnostic, blank and corrupt rows clear the parsed fields instead of using a nearby frame', () => {
+  const s=E.parse(base+','+frame(100)+'\n\nerror device note\n'+(base+1)+',AB0001000000650001');
+  for(const line of [2,3,4]) {
+    const value=E.inspect({raw:s},{source:'raw',line,index:0});
+    assert.equal(value.detail.frame,null); assert.equal(value.detail.event.kind,'logLine');
+    assert.equal(value.detail.event.sid,undefined); assert.equal(value.detail.sections[0].line,line);
+  }
+});
+
+test('whole-log windows retain unmodified physical lines and bound each transfer', () => {
+  const input=Array.from({length:2000},(_,i)=>i%2 ? 'diagnostic '+i : (base+i)+','+frame(i)).join('\r\n');
+  const s=E.parse(input);
+  const middle=E.logWindow(s,1001,100000);
+  assert.equal(middle.total,2000); assert.equal(middle.lines.length,160);
+  assert.equal(middle.lines[0].text,input.split('\r\n')[1000]); assert.equal(middle.lines[0].n,1001);
+  assert.equal(E.logWindow(s,2000).lines[0].text,'diagnostic 1999');
+  assert.equal(E.logWindow(s,3000).lines[0].n,2000);
+  assert.equal(E.detail({raw:s},s.events[0]).sections[0].totalLines,2000);
+});
+
 if(process.env.AB_ROLLBACK_LOG) test('reported rollback log contains six distinct counter transitions', () => {
   const s=E.parse(fs.readFileSync(process.env.AB_ROLLBACK_LOG,'utf8'));
   assert.equal(s.counts.frames,27888); assert.equal(s.counts.rollback,6); assert.equal(s.segments,7);

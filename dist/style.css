@@ -154,6 +154,26 @@ select,input[type=datetime-local]{border:1px solid var(--line);border-radius:6px
 .byte-caption{margin-top:7px;font-size:11px;color:#afc0d8}
 .raw-section .code{max-height:210px}
 .context-note{padding:11px 16px;color:var(--muted);font-size:12px;line-height:1.7}
+.record-controls,.record-choices{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:0 16px 12px;color:var(--muted);font-size:12px}
+.record-choices button[aria-pressed=true]{background:var(--blue);color:#fff}
+.tag.record{color:#285ea8;background:#edf3ff}
+.chart-record{cursor:pointer;outline:none}.chart-record:hover circle{fill:#d4e3ff;stroke-width:2.5}
+.chart-svg:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+.code-sections{max-height:720px}
+.raw-section .log-viewport{height:280px;max-height:280px;padding:0;position:relative;overflow:auto;overscroll-behavior:contain;overflow-anchor:none}
+.log-viewport:focus-visible{outline:2px solid #a5c9ff;outline-offset:-2px}
+.log-canvas{position:relative;overflow:clip;min-width:100%}
+.log-window{position:absolute;left:0;right:0}
+.log-window .code-line{height:28px;line-height:28px;cursor:pointer}
+.log-window .code-line:hover{background:#243d59}
+.log-window .code-line.selected-line{background:#324e71;box-shadow:inset 3px 0 #ffe08a;color:#fff}
+.log-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid #34435a;background:#1b2a41;color:#c8d5e8;font-size:12px}
+.log-toolbar label{display:flex;align-items:center;gap:6px}
+.log-toolbar input{width:86px;background:#122033;color:#fff;border:1px solid #7184a1;border-radius:4px;padding:5px;min-height:32px}
+.log-toolbar button{border:1px solid #7184a1;border-radius:4px;background:#314863;color:#fff;min-height:32px;padding:4px 8px;font-size:12px}
+.log-toolbar button:hover{background:#446282}
+.log-status{font-size:12px;padding:7px 12px;color:#bacce4;background:#1b2a41}
+.no-frame{font-size:12px;color:#d8e4f5}
 .footbar{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:12px;flex-wrap:wrap}
 dialog{border:1px solid var(--line);border-radius:13px;padding:25px;color:var(--ink);width:min(580px,calc(100% - 32px));max-height:88vh;overflow:auto;box-shadow:0 20px 90px #192c4730}
 dialog::backdrop{background:#17253a66}
@@ -187,3 +207,4 @@ progress{width:100%;height:10px;accent-color:var(--blue);display:block;margin:25
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
 @media(max-width:1250px){.stats.extended{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:650px){.stats.extended{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:950px){.code-sections{max-height:720px}}

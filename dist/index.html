@@ -8,10 +8,10 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob:; script-src 'self'; worker-src blob:; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>AB 日志分析</title>
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./style.css?v=1.2.0">
-  <script src="./engine.js?v=1.2.0" defer></script>
-  <script src="./worker.js?v=1.2.0" defer></script>
-  <script src="./app.js?v=1.2.0" defer></script>
+  <link rel="stylesheet" href="./style.css?v=1.3.0">
+  <script src="./engine.js?v=1.3.0" defer></script>
+  <script src="./worker.js?v=1.3.0" defer></script>
+  <script src="./app.js?v=1.3.0" defer></script>
 </head>
 <body>
 <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -34,7 +34,7 @@
       <button class="navbtn" data-mode="pair" disabled><svg class="ico"><use href="#i-compare"/></svg>配对比较</button>
     </nav>
     <div id="sourceNote" class="file-note">导入一份日志独立分析，或导入同一次连接的两份日志进行比较。</div>
-    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>刷新或关闭页面后清除</span><span class="version">v1.2 · 网页工具</span></div>
+    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>刷新或关闭页面后清除</span><span class="version">v1.3 · 网页工具</span></div>
   </aside>
   <main class="main">
     <header class="topbar">
@@ -74,7 +74,9 @@
           <div class="panel-head"><h3>原文定位</h3><span class="pill mono" id="eventID">—</span></div>
           <div class="inspector-summary"><h3 id="detailTitle">选择一条记录</h3><p id="detailSummary"></p></div>
           <div class="fields" id="fields"></div>
-          <div class="raw-header"><span id="contextTitle">相关原始片段</span><button id="copyBtn" class="button compact" disabled>复制片段</button></div>
+          <div class="record-controls" id="recordControls" hidden><button class="button compact" id="recordPrev">上一报文</button><span id="recordPosition"></span><button class="button compact" id="recordNext">下一报文</button><button class="button compact" id="backToEvent" hidden>返回异常</button></div>
+          <div class="record-choices" id="recordChoices" hidden></div>
+          <div class="raw-header"><span id="contextTitle">原文浏览 · 完整日志</span><button id="copyBtn" class="button compact" disabled>复制片段</button></div>
           <div class="code-sections" id="codeSections"></div>
           <div class="context-note" id="contextNote"></div>
         </section>
@@ -103,7 +105,7 @@
   <p class="small">导出以完整文件的分析结论为准，筛选不会重新计算缺号。</p>
 </dialog>
 <dialog id="aboutDialog"><div class="dialog-heading"><h2>判定说明</h2><button class="button compact" data-close>关闭</button></div>
-  <ul class="rules"><li>按源日志的记录顺序分析，所有命令共用一个 16 位序号。</li><li>先跳号、后补到的报文列为“乱序补到”；只有本段完整分析后仍未出现的序号列为“最终缺号”。文件首尾范围之外不补缺号。</li><li>同一段的同一周期同号且完整帧相同为重复；同号但内容不同单独列示。65535 → 0 为正常回绕。</li><li>周期按距离最近的序号推进方向解释。恰好相差半周期，或向观测范围之前倒退超过 4096 个序号时保守分段；小范围的开头补到仍参与同段统计。</li><li>持续回退：向后回退后至少 4 条连续递增，且回退至本段起点之前、距已见最大值超过 4096；或随后最多 8 条中至少 3 个已出现序号带有新内容，标为“持续回退待核对”。这些阈值是工程默认值，不证明重启；普通缺口补到、原样重复和孤立同号异内容仍沿用原判定。</li><li>不同分析段不互相填补缺号。段内缺号为 0 不代表整份日志完整；段间是否缺失、是否重置或重放需要设备端记录确认。多设备混合、任意多段连接及跨周期极端迟到无法仅凭序号还原。</li><li>支持分片与一行多帧。只有完整帧且 CRC16 校验通过的序号参与统计。无法解析的记录保留原文。</li><li>缺号描述本日志的缺口，不直接等于蓝牙丢包。过滤后的缺号可能来自正常过滤。</li><li>配对依据原始接收时间戳与完整帧，逐次匹配，并显示出现次数及顺序差异；相同时间戳、相同帧的重复对应关系列为待核对。比较只呈现事实，不推测过滤原因。</li><li>图表概览保留每段最高与最低点，同位置的异常标记显示数量。放大或从列表逐条查看；所有异常均参与统计和导出。</li><li>文件保留在当前页面的内存中。没有日志上传、在线接口或外部统计；刷新或关闭页面后清除。</li></ul>
+  <ul class="rules"><li>按源日志的记录顺序分析，所有命令共用一个 16 位序号。</li><li>先跳号、后补到的报文列为“乱序补到”；只有本段完整分析后仍未出现的序号列为“最终缺号”。文件首尾范围之外不补缺号。</li><li>同一段的同一周期同号且完整帧相同为重复；同号但内容不同单独列示。65535 → 0 为正常回绕。</li><li>周期按距离最近的序号推进方向解释。恰好相差半周期，或向观测范围之前倒退超过 4096 个序号时保守分段；小范围的开头补到仍参与同段统计。</li><li>持续回退：向后回退后至少 4 条连续递增，且回退至本段起点之前、距已见最大值超过 4096；或随后最多 8 条中至少 3 个已出现序号带有新内容，标为“持续回退待核对”。这些阈值是工程默认值，不证明重启；普通缺口补到、原样重复和孤立同号异内容仍沿用原判定。</li><li>不同分析段不互相填补缺号。段内缺号为 0 不代表整份日志完整；段间是否缺失、是否重置或重放需要设备端记录确认。多设备混合、任意多段连接及跨周期极端迟到无法仅凭序号还原。</li><li>支持分片与一行多帧。只有完整帧且 CRC16 校验通过的序号参与统计。无法解析的记录保留原文。</li><li>缺号描述本日志的缺口，不直接等于蓝牙丢包。过滤后的缺号可能来自正常过滤。</li><li>配对依据原始接收时间戳与完整帧，逐次匹配，并显示出现次数及顺序差异；相同时间戳、相同帧的重复对应关系列为待核对。比较只呈现事实，不推测过滤原因。</li><li>图表概览保留每段最高与最低点，同位置的异常标记显示数量。普通报文也可点击；概览点击最近的实际采样记录，局部放大或使用相邻报文按钮逐包查看。原文可滚动完整文件，点击行同步更新序号、帧头与命令 / Key。一行多帧提供选择，非有效报文行清空解析；查看普通报文不改变异常统计和导出。</li><li>文件保留在当前页面的内存中。没有日志上传、在线接口或外部统计；刷新或关闭页面后清除。</li></ul>
   <p class="small">序号默认同时显示 HEX 和十进制；AB 帧内偏移 6、7（第 7、8 字节）是序号，低字节在前。例如原文 04 84 = 0x8404 = 十进制 33796。选中记录后，黄色标记指出对应的原始字节；缺号仅高亮前后实际存在的报文。</p>
   <p class="small">日志格式：毫秒时间戳,十六进制报文。命令取消息体首字节，Key 仅展示消息体偏移 2 的可用值，具体含义以命令结构为准。</p>
 </dialog>

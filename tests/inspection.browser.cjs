@@ -1,0 +1,138 @@
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const {pathToFileURL}=require('node:url');
+const {chromium}=require(process.env.AB_PLAYWRIGHT_PATH||'playwright');
+const E=require('../dist/engine.js');
+const root=path.resolve(__dirname,'..'),out=path.join(root,'artifacts');
+fs.mkdirSync(out,{recursive:true});
+const url=process.env.AB_PREVIEW_URL||'http://127.0.0.1:4178';
+const report={checks:[],errors:[],requests:[],performance:{}};
+const ok=(name,value=true)=>{assert.ok(value,name);report.checks.push(name);};
+const base=1800000000000,logLines=[];
+for(let i=0;i<2000;i++) logLines.push((base+i)+','+E.makeFrame(1000+i,[[0x7b,1,2][i%3],3,[0x11,0x12,0x15][i%3],i&255]),'diagnostic '+i,'');
+const normal={name:'normal-scroll.txt',mimeType:'text/plain',buffer:Buffer.from(logLines.join('\n'))};
+const expectSid=async(p,sid)=>p.waitForFunction(sid=>document.querySelector('#detailTitle .seq-primary')?.textContent===sid,sid);
+const sourceByteTexts=async p=>(await p.locator('.seq-byte-mark').allTextContents()).map(s=>s.toUpperCase());
+async function load(p,file,mode='raw'){
+  await p.locator('#newTask').click();await p.locator('[data-input="'+mode+'"]').click();
+  await p.locator(mode==='filtered'?'#filteredFile':'#rawFile').setInputFiles(file);
+  await p.locator('#analyzeBtn').click();await p.locator('#workspace').waitFor({state:'visible'});
+  await p.locator('.log-window .code-line').first().waitFor();
+}
+(async()=>{
+  const browser=await chromium.launch({headless:true,executablePath:process.env.AB_BROWSER||'C:/Program Files/Google/Chrome/Application/chrome.exe'});
+  const context=await browser.newContext({viewport:{width:1440,height:1080},acceptDownloads:true});
+  const page=await context.newPage();page.setDefaultTimeout(15000);
+  page.on('pageerror',e=>report.errors.push(e.message));
+  page.on('console',e=>{if(e.type()==='error')report.errors.push(e.text());});
+  page.on('request',r=>report.requests.push({url:r.url(),method:r.method()}));
+  try{
+    await page.goto(url);await load(page,normal);await expectSid(page,'0x03E8');
+    ok('A log with zero anomalies still opens its first real packet',await page.locator('#eventRows tr').count()===0&&(await page.locator('#fields').innerText()).includes('0x7B / 0x11'));
+    ok('Initial chart still covers the whole normal log',(await page.locator('#chartSubtitle').innerText()).includes('1–2,000'));
+    await page.locator('#focusBtn').click();await page.locator('[data-record-index="5"]').click();await expectSid(page,'0x03ED');
+    ok('Clicking a normal chart point selects its real packet, command and key',(await page.locator('.command-slot').innerText()).includes('0x02')&&(await page.locator('.key-slot').innerText()).includes('0x15'));
+    await page.waitForFunction(()=>document.querySelectorAll('.seq-byte-mark').length===2);
+    ok('Normal packet highlights only its actual SID bytes',JSON.stringify(await sourceByteTexts(page))===JSON.stringify(['ED','03']));
+    await page.locator('#recordNext').click();await expectSid(page,'0x03EE');
+    ok('Packet navigation updates command/key and header together',(await page.locator('#fields').innerText()).includes('0x7B / 0x11')&&(await page.locator('.command-slot').innerText()).includes('0x7B'));
+    await page.locator('#chart').focus();await page.keyboard.press('ArrowRight');await expectSid(page,'0x03EF');
+    ok('Normal packet chart navigation supports the keyboard');
+    const scroll=page.locator('.log-viewport').first();
+    await scroll.evaluate(el=>el.scrollTop=1000*28);
+    await page.locator('[data-log-line="1003"]').waitFor();
+    const oldTop=await scroll.evaluate(el=>el.scrollTop);
+    await page.locator('[data-log-line="1003"]').click();await expectSid(page,E.hexWord(1334));
+    ok('Scrolling beyond the old snippet and selecting a row updates the inspector',(await page.locator('#fields').innerText()).includes('L1003'));
+    ok('Selecting a visible row preserves scroll position',Math.abs((await page.locator('.log-viewport').evaluate(el=>el.scrollTop))-oldTop)<2);
+    await page.locator('[data-log-line="1004"]').click();
+    await page.waitForFunction(()=>document.querySelector('#detailTitle').textContent.includes('原始日志行'));
+    ok('Diagnostic row clears SID, command/key and previous byte highlights',await page.locator('.seq-byte-mark').count()===0&&(await page.locator('#fields').innerText()).includes('— / —')&&await page.locator('.command-slot').count()===0);
+    await page.locator('.log-viewport').focus();await page.keyboard.press('ArrowDown');
+    await page.waitForFunction(()=>document.querySelector('#fields').textContent.includes('L1005'));
+    ok('Blank physical rows remain accessible by keyboard');
+    await page.locator('.log-jump').fill('5998');await page.locator('[data-log-action="jump"]').click();
+    await page.locator('[data-log-line="5998"]').click();await expectSid(page,E.hexWord(2999));
+    ok('Line-number jump reaches the final packet');
+    await page.locator('[data-log-action="start"]').click();await page.locator('[data-log-line="1"]').click();await expectSid(page,'0x03E8');
+    ok('Return to the start keeps original line 1 and command/key');
+    await page.locator('.log-viewport').evaluate(el=>{el.scrollTop=200*28;el.scrollTop=4900*28;el.scrollTop=3000*28;});
+    await page.locator('[data-log-line="3001"]').waitFor();
+    ok('Rapid scrolling shows the final requested range',await page.locator('.log-window .code-line').count()<80);
+    await page.locator('[data-log-action="end"]').click();await page.locator('[data-log-line="5999"]').waitFor();
+    ok('The native log viewport reaches the actual file end');
+    await page.locator('#fullBtn').click();
+    await page.waitForFunction(()=>document.querySelector('#chartSubtitle').textContent.includes('1–2,000'));
+    const beforeOverview=(await page.locator('#recordPosition').innerText());
+    await page.locator('#chart').evaluate(svg=>{
+      const path=svg.querySelector(':scope > path'),at=path.getPointAtLength(path.getTotalLength()*.65),screen=new DOMPoint(at.x,at.y).matrixTransform(svg.getScreenCTM());
+      svg.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:screen.x,clientY:screen.y}));
+    });
+    await page.waitForFunction(before=>document.querySelector('#recordPosition').textContent!==before,beforeOverview);
+    ok('The full chart also selects a real sampled packet');
+    for(const [width,height] of [[1280,960],[375,900],[812,375]]){
+      await page.setViewportSize({width,height});
+      ok('Whole-log inspector fits viewport '+width+'x'+height,await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+      await page.screenshot({path:path.join(out,'inspection-'+width+'.png'),fullPage:true});
+    }
+    await page.setViewportSize({width:1440,height:1080});
+    const a=E.makeFrame(100),b=E.makeFrame(101,[1,3,0x16,0]);
+    const fragmented={name:'multi-frame.txt',mimeType:'text/plain',buffer:Buffer.from(base+','+a.slice(0,14)+'\nerror fragment\n'+(base+1)+','+a.slice(14)+b)};
+    await load(page,fragmented);await page.locator('[data-log-line="3"]').click();await expectSid(page,'0x0064');
+    await page.locator('#recordChoices').waitFor({state:'visible'});
+    ok('One physical row exposes both reassembled frame choices',await page.locator('[data-record-choice]').count()===2);
+    await page.locator('[data-record-choice="1"]').click();await expectSid(page,'0x0065');
+    ok('Choosing the second same-line packet updates command/key and exact header',(await page.locator('.command-slot').innerText()).includes('0x01')&&(await page.locator('.key-slot').innerText()).includes('0x16'));
+    await page.locator('#kindFilter').selectOption('duplicate');
+    await page.waitForFunction(()=>document.querySelector('#detailTitle').textContent.includes('没有选中的记录'));
+    ok('An empty anomaly filter clears frame choices and the previous parsing',!await page.locator('#recordChoices').isVisible()&&await page.locator('.command-slot').count()===0);
+    await page.locator('#kindFilter').selectOption('all');await page.locator('[data-log-line="3"]').click();
+    await page.locator('#recordChoices').waitFor({state:'visible'});
+    await page.locator('[data-record-choice="0"]').click();await expectSid(page,'0x0064');
+    await page.locator('[data-locate-byte="0:7"]').click();
+    ok('Fragmented high-byte locator jumps to the correct line',await page.evaluate(()=>document.activeElement?.closest('.code-line').dataset.logLine==='3'));
+    await page.locator('[data-log-line="2"]').click();
+    await page.waitForFunction(()=>document.querySelector('.no-frame'));
+    ok('A diagnostic between fragments never inherits that frame');
+    if(process.env.AB_ROLLBACK_LOG){
+      await load(page,process.env.AB_ROLLBACK_LOG);
+      await page.waitForFunction(()=>document.querySelectorAll('.seq-byte-mark').length===4);
+      ok('Rollback still shows its two original anchors',await page.locator('.raw-section').count()===2&&(await page.locator('#detailTitle').innerText()).includes('0xD848 → 0xBB71'));
+      await page.locator('.log-viewport').first().evaluate(el=>el.scrollLeft=180);
+      ok('Source line numbers remain visible during horizontal scrolling',await page.locator('.log-viewport').first().evaluate(el=>Math.abs(el.querySelector('.ln').getBoundingClientRect().left-el.getBoundingClientRect().left)<2));
+      await page.locator('.log-viewport').first().evaluate(el=>el.scrollLeft=0);
+      await page.locator('.raw-section').first().locator('[data-log-line="12958"]').click();
+      await page.waitForFunction(()=>document.querySelector('#detailTitle').textContent.includes('报文记录'));
+      ok('Browsing a neighboring normal row exposes a return-to-anomaly action',await page.locator('#backToEvent').isVisible());
+      await page.locator('#backToEvent').click();
+      await page.waitForFunction(()=>document.querySelector('#detailTitle').textContent.includes('0xD848 → 0xBB71'));
+      ok('Return restores the boundary and both original contexts',await page.locator('.raw-section').count()===2);
+      await page.locator('#toast').evaluate(el=>el.hidden=true);
+      await page.screenshot({path:path.join(out,'inspection-rollback.png'),fullPage:true});
+    }
+    const large=path.join(out,'generated-50MiB.txt');
+    if(fs.existsSync(large)){
+      await load(page,large);const start=Date.now();
+      await page.locator('.log-viewport').evaluate(el=>el.scrollTop=el.scrollHeight);
+      await page.locator('[data-log-line="235107"]').click();await expectSid(page,E.hexWord(235106));
+      report.performance.lastLineMs=Date.now()-start;
+      ok('A 50 MiB file scrolls to its final record without rendering the whole file',await page.locator('.code-line').count()<80&&report.performance.lastLineMs<5000);
+    }
+    const manyLines={name:'many-physical-lines.txt',mimeType:'text/plain',buffer:Buffer.from(base+','+E.makeFrame(1000)+'\n'+'diagnostic\n'.repeat(300000)+(base+1)+','+E.makeFrame(1001))};
+    await load(page,manyLines);
+    await page.locator('.log-viewport').evaluate(el=>el.scrollTop=el.scrollHeight);
+    await page.locator('[data-log-line="300002"]').click();await expectSid(page,'0x03E9');
+    ok('Compressed scroll range still reaches every line beyond the browser height budget',await page.locator('.log-viewport').evaluate(el=>el.scrollHeight<=8000001)&&await page.locator('.code-line').count()<80);
+    await context.setOffline(true);await load(page,normal,'filtered');await expectSid(page,'0x03E8');
+    await page.locator('[data-log-line="4"]').click();await expectSid(page,'0x03E9');
+    ok('Filtered standalone row selection also works offline');
+    await context.setOffline(false);
+    const local=await context.newPage();await local.goto(pathToFileURL(path.join(root,'dist/index.html')).href);
+    await load(local,fragmented);await local.locator('[data-log-line="3"]').click();await expectSid(local,'0x0064');
+    ok('Full-log inspection works with file:// as well as hosting');await local.close();
+    ok('No runtime errors',report.errors.length===0);
+    const origin=new URL(url).origin;
+    ok('No uploaded log content or external calls',report.requests.every(r=>r.method==='GET'&&(r.url.startsWith(origin+'/')||r.url.startsWith('blob:'))));
+    report.success=true;report.browser=await browser.version();
+    console.log(JSON.stringify({passed:report.checks.length,performance:report.performance,browser:report.browser},null,2));
+  }finally{fs.writeFileSync(path.join(out,'inspection-verification.json'),JSON.stringify(report,null,2));await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

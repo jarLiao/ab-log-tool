@@ -16,6 +16,8 @@
   let worker, pending = new Map(), requestId = 0, renderId = 0, meta = null;
   let mode = 'raw', inputMode = 'raw', selected = '', currentView = null, activeChart = {}, focused = true;
   let files = {raw: null, filtered: null}, contextText = '', toastTimer, filterTimer, demo = false, started = 0;
+  let inspection = null, logStates = [], detailKey = '', chartPoints = [];
+  const LOG_ROW_HEIGHT = 28;
   function toast(text, delay = 4200) {
     $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { $('toast').hidden = true; }, delay);
@@ -56,6 +58,7 @@
     });
   }
   function resetWorkspace() {
+    inspection = null; detailKey = ''; logStates = []; chartPoints = [];
     meta = null; selected = ''; currentView = null; contextText = ''; renderId++;
     $('workspace').hidden = true; $('welcome').hidden = false; $('exportBtn').disabled = true;
     document.querySelectorAll('[data-mode]').forEach(b => { b.disabled = true; });
@@ -112,6 +115,7 @@
       from: t('timeFrom'), to: t('timeTo'), coverage: $('coverageFilter').value};
   }
   function clearFilters() {
+    inspection = null;
     $('search').value = $('commandFilter').value = $('timeFrom').value = $('timeTo').value = '';
     $('kindFilter').value = $('coverageFilter').value = 'all';
   }
@@ -178,12 +182,13 @@
   }
   async function requestView(extra = {}) {
     if (!meta) return;
+    if (extra.move != null || extra.page != null) inspection = null;
     const ticket = ++renderId;
     try {
-      const view = await rpc('view', {mode, filter: currentFilter(), selected,
+      const view = await rpc('view', {mode, filter: currentFilter(), selected, inspection,
         chart: {...activeChart, focus: focused}, ...extra});
       if (ticket !== renderId) return;
-      currentView = view; selected = view.selected; activeChart = {side: view.chart.side, lo: view.chart.lo, hi: view.chart.hi};
+      currentView = view; selected = view.selected; inspection = view.inspection; activeChart = {side: view.chart.side, lo: view.chart.lo, hi: view.chart.hi};
       $('chartSide').value = view.chart.side;
       renderList(); renderDetail(); renderChart();
     } catch (e) { if (e.message !== '已取消') toast(e.message); }
@@ -191,8 +196,8 @@
   function renderList() {
     const v = currentView;
     $('sequenceHead').textContent = useHex() ? '序号 HEX / DEC' : '序号 DEC / HEX';
-    $('eventRows').innerHTML = v.items.map(e => '<tr tabindex="0" data-id="' + e.id + '" class="' + (e.id === selected ? 'selected' : '') +
-      '" aria-selected="' + (e.id === selected) + '"><td><span class="tag ' + e.kind + '">' + E.title(e) +
+    $('eventRows').innerHTML = v.items.map(e => '<tr tabindex="0" data-id="' + e.id + '" class="' + (!inspection && e.id === selected ? 'selected' : '') +
+      '" aria-selected="' + (!inspection && e.id === selected) + '"><td><span class="tag ' + e.kind + '">' + E.title(e) +
       '</span></td><td class="sequence-cell">' + sequenceMarkup(e) + '</td><td class="mono">' +
       (mode === 'pair' ? e.coverage === 'inside' ? '共有范围内' : e.coverage === 'outside' ? '共有范围外' : '无共有范围' : e.kind === 'gap' ? num(e.count) : '—') +
       '</td><td class="mono">' + (mode === 'pair' ? e.source === 'raw' ? '原 ' : '滤 ' : '') + 'L' + e.line +
@@ -220,7 +225,7 @@
     return out + esc(line.text.slice(cursor));
   }
   function frameAnchor(frame, index) {
-    if (!frame) return '';
+    if (!frame) return '<div class="sequence-anchor no-frame">本行无有效报文 · 序号 — · 命令 / Key — / —</div>';
     const h = frame.header;
     return '<div class="sequence-anchor"><div class="sequence-map"><span>原文字节</span><strong class="mono source-value">' +
       frame.seqBytes + '</strong><span>→</span><strong class="mono">' + frame.sidHex + '</strong><span class="mono">DEC ' + frame.sid +
@@ -230,9 +235,17 @@
       '<span class="header-slot sequence-slot"><small>序号 · 低 → 高</small><span class="sequence-byte-buttons">' +
       frame.anchors.map(a => '<button class="mono" data-locate-byte="' + index + ':' + a.frameOffset + '" title="定位序号' + a.role +
         '，原文 L' + a.line + ' 第 ' + (a.start + 1) + ' 列">' + a.value + '</button>').join('') +
-      '</span></span></div><div class="byte-caption">AB 第 7、8 字节 · 偏移 6、7 · 小端：低字节在前</div></div>';
+      '</span></span><span class="header-slot command-slot"><small>命令</small><strong class="mono">' + (frame.cmd || '—') +
+      '</strong></span><span class="header-slot key-slot"><small>Key</small><strong class="mono">' + (frame.key || '—') +
+      '</strong></span></div><div class="byte-caption">AB 第 7、8 字节 · 偏移 6、7 · 小端：低字节在前</div></div>';
   }
-  function revealByte(target, scrollSection = false) {
+  async function revealByte(target, scrollSection = false) {
+    const [section, offset] = target.split(':').map(Number), state = logStates[section];
+    const anchor = state?.section.frame?.anchors.find(a => a.frameOffset === offset);
+    if (state && anchor && !$('codeSections').querySelector('[data-source-byte="' + target + '"]')) {
+      scrollLogTo(state, anchor.line); await loadLogWindow(state, true);
+      if (!state.code.isConnected) return;
+    }
     const mark = $('codeSections').querySelector('[data-source-byte="' + target + '"]');
     if (!mark) return;
     const code = mark.closest('.code'), box = code.getBoundingClientRect(), at = mark.getBoundingClientRect();
@@ -245,32 +258,111 @@
       mark.focus({preventScroll: true});
     }
   }
-  function renderDetail() {
+  function logUnit(state) {
+    const visible = Math.ceil(state.code.clientHeight / LOG_ROW_HEIGHT);
+    return state.height < state.section.totalLines * LOG_ROW_HEIGHT ?
+      (state.height - state.code.clientHeight) / Math.max(1, state.section.totalLines - visible) : LOG_ROW_HEIGHT;
+  }
+  function scrollLogTo(state, line) {
+    state.code.scrollTop = Math.max(0, line - 5) * Math.max(.001, logUnit(state));
+  }
+  async function loadLogWindow(state, force = false) {
+    if (!state.code.isConnected) return;
+    const unit = Math.max(.001, logUnit(state));
+    const firstVisible = Math.floor(state.code.scrollTop / unit);
+    const first = Math.max(1, firstVisible - 8 + 1);
+    if (!force && first === state.first) return;
+    const ticket = ++state.ticket; state.first = first;
+    state.status.textContent = '正在读取原文…';
+    try {
+      const result = await rpc('logWindow', {source: state.section.side, first, count: Math.ceil(state.code.clientHeight / LOG_ROW_HEIGHT) + 18});
+      if (ticket !== state.ticket || !state.code.isConnected) return;
+      const s = state.section, currentLine = state.selectedLine;
+      state.window.style.top = (state.code.scrollTop - (state.code.scrollTop / unit - (first - 1)) * LOG_ROW_HEIGHT) + 'px';
+      state.window.innerHTML = result.lines.map(l => '<div class="code-line ' + (l.n >= s.line && l.n <= s.endLine ? 'highlight' : '') +
+        (l.n === currentLine ? ' selected-line' : '') + (/error|reorder_skip/i.test(l.text) ? ' diagnostic' : '') +
+        '" role="option" id="log-line-' + state.index + '-' + l.n + '" aria-posinset="' + l.n + '" aria-setsize="' + result.total +
+        '" aria-selected="' + (l.n === currentLine) + '" tabindex="-1" data-log-line="' + l.n + '"><span class="ln">' + l.n +
+        '</span><code>' + rawMarkup(l, s.frame?.anchors || [], state.index) + '</code></div>').join('');
+      if (result.lines.some(l => l.n === currentLine)) state.code.setAttribute('aria-activedescendant', 'log-line-' + state.index + '-' + currentLine);
+      else state.code.removeAttribute('aria-activedescendant');
+      state.status.textContent = 'L' + first + '–L' + (first + result.lines.length - 1) + ' / 共 ' + num(result.total) + ' 行 · 点击行查看解析';
+    } catch (error) {
+      if (ticket === state.ticket && state.code.isConnected && error.message !== '已取消') state.status.textContent = '读取失败：' + error.message;
+    }
+  }
+  async function inspectRecord(selection, position = null, keyboard = false) {
+    const ticket = ++renderId;
+    try {
+      const result = await rpc('inspect', {selection});
+      if (ticket !== renderId || !result.detail) return;
+      inspection = result.selection; currentView.detail = result.detail;
+      renderList(); renderDetail({position}); renderChart();
+      const frame = result.detail.frame, chart = currentView.chart;
+      if (frame && (chart.side !== inspection.source || frame.index < chart.lo || frame.index > chart.hi)) {
+        focused = false; activeChart = {side: inspection.source, lo: Math.max(0, frame.index - 20), hi: frame.index + 20};
+        await requestView();
+      }
+      if (keyboard && logStates[0]) {
+        await loadLogWindow(logStates[0], true);
+        logStates[0].code.focus({preventScroll: true});
+      }
+    } catch (error) { if (error.message !== '已取消') toast(error.message); }
+  }
+  function renderDetail(options = {}) {
     const d = currentView.detail; $('copyBtn').disabled = !d;
+    $('recordControls').hidden = !d;
+    $('backToEvent').hidden = !inspection || !selected;
     if (!d) {
+      detailKey = ''; logStates = [];
+      $('recordChoices').hidden = true; $('recordChoices').innerHTML = '';
       $('eventID').textContent = '—'; $('detailTitle').textContent = '没有选中的记录'; $('detailSummary').textContent = '从异常列表或图中选择一条记录。';
       $('fields').innerHTML = $('codeSections').innerHTML = ''; $('contextNote').textContent = ''; contextText = ''; return;
     }
     const e = d.event;
+    $('recordPrev').disabled = !d.frame || d.frame.index === 0;
+    $('recordNext').disabled = !d.frame || d.frame.index + 1 >= d.frame.total;
+    $('recordPosition').textContent = d.frame ? '报文 ' + num(d.frame.index + 1) + ' / ' + num(d.frame.total) : '原文 L' + e.line;
+    $('recordChoices').innerHTML = d.choices?.length > 1 ? '<span>本行有 ' + d.choices.length + ' 个有效报文：</span>' + d.choices.map(c =>
+      '<button class="button compact" data-record-choice="' + c.index + '" aria-pressed="' + (d.frame?.index === c.index) + '">' +
+      E.hexWord(c.sid) + ' · ' + (E.hexByte(c.cmd) || '—') + ' / ' + (E.hexByte(c.key) || '—') + '</button>').join('') : '';
+    $('recordChoices').hidden = !d.choices || d.choices.length < 2;
     $('eventID').textContent = e.id;
     $('detailTitle').innerHTML = '<span class="tag ' + e.kind + '">' + E.title(e) + '</span> <span class="detail-sequence">' + sequenceMarkup(e) + '</span>';
     $('detailSummary').textContent = d.description;
     const fields = [['源行范围', 'L' + e.line + (e.endLine !== e.line ? '–L' + e.endLine : '')],
-      ['接收时间', E.timestamp(e.t)], ['命令 / Key', d.frame ? d.frame.cmd + ' / ' + (d.frame.key || '—') : '不可可靠解析'],
+      ['接收时间', E.timestamp(e.t) || '—'], ['命令 / Key', d.frame ? (d.frame.cmd || '—') + ' / ' + (d.frame.key || '—') : '— / —'],
       ['可分析段 / 序号周期', d.frame ? d.frame.segment + ' / ' + d.frame.cycle : '—']];
     $('fields').innerHTML = fields.map(([a, b]) => '<div class="field"><span>' + a + '</span><strong class="mono">' + esc(b) + '</strong></div>').join('');
-    $('codeSections').innerHTML = d.sections.map((s, index) => '<section class="raw-section"><div class="code-name">' + s.description + ' · ' + esc(s.name) +
-      ' · L' + s.line + (s.endLine !== s.line ? '–L' + s.endLine : '') + '</div>' + frameAnchor(s.frame, index) +
-      '<div class="code" tabindex="0" aria-label="' + esc(s.description + ' 原始日志片段') + '">' +
-      s.lines.map(l => '<div class="code-line ' + (l.highlight ? 'highlight' : '') + ' ' + (/error|reorder_skip/i.test(l.text) ? 'diagnostic' : '') + '"><span class="ln">' +
-        (l.n ?? '…') + '</span><code>' + rawMarkup(l, s.frame?.anchors || [], index) + '</code></div>').join('') + '</div></section>').join('');
     contextText = '[' + e.id + '] ' + E.title(e) + ' ' + E.dualLabel(e) + '\n' + d.description + '\n\n' +
       d.sections.map(s => s.name + '\n' + (s.frame ? '原文字节 ' + s.frame.seqBytes + ' → ' + s.frame.sidHex + ' = DEC ' + s.frame.sid + '（小端）\n' : '') +
+        (s.frame ? '命令 / Key：' + (s.frame.cmd || '—') + ' / ' + (s.frame.key || '—') + '\n' : '') +
         s.lines.map(l => (l.n == null ? '' : 'L' + l.n + '  ') + l.text).join('\n')).join('\n\n');
-    $('contextNote').textContent = '黄色字节与上方序号对应，原始文字保持不变。' +
-      (e.kind === 'gap' ? '缺号没有原始报文；这里只高亮缺号范围前后实际存在的序号。' : '点击帧头中的低 / 高字节，可定位跨行或同一行多帧中的准确位置。');
+    $('contextNote').textContent = '可滚动浏览完整文件，点击行同步更新解析；↑ / ↓ 选择相邻行，Home / End 到文件首尾。' +
+      (e.kind === 'gap' ? '缺号没有原始报文；黄色字节属于前后实际存在的报文。' : '点击序号低 / 高字节可跳到字段原文。');
+    const key = [e.id, e.source, e.line, d.selectedLine].join(':');
+    if (key === detailKey && logStates.length && logStates[0].code.isConnected) return;
+    detailKey = key;
+    $('codeSections').innerHTML = d.sections.map((s, index) => '<section class="raw-section" data-log-section="' + index + '"><div class="code-name">' + s.description + ' · ' + esc(s.name) +
+      ' · L' + s.line + (s.endLine !== s.line ? '–L' + s.endLine : '') + '</div>' + frameAnchor(s.frame, index) +
+      '<div class="log-toolbar"><label>行号 <input type="number" class="log-jump" min="1" max="' + s.totalLines + '" value="' + (d.selectedLine || s.line) + '" aria-label="跳转原文行号"></label>' +
+      '<button data-log-action="jump">跳转</button><button data-log-action="start">首行</button><button data-log-action="end">末行</button><button data-log-action="selected">选中行</button></div>' +
+      '<div class="code log-viewport" tabindex="0" role="listbox" aria-label="' + esc(s.name + ' 完整日志，可用上下方向键选择行') + '"><div class="log-canvas"><div class="log-window"></div></div></div>' +
+      '<div class="log-status"></div></section>').join('');
+    logStates = d.sections.map((s, index) => {
+      const el = $('codeSections').querySelector('[data-log-section="' + index + '"]'), code = el.querySelector('.code');
+      const height = Math.max(LOG_ROW_HEIGHT, Math.min(8000000, s.totalLines * LOG_ROW_HEIGHT));
+      const state = {section: s, index, code, height, window: el.querySelector('.log-window'), status: el.querySelector('.log-status'), ticket: 0,
+        selectedLine: d.selectedLine || s.line, first: null};
+      const canvas = el.querySelector('.log-canvas'); canvas.style.height = height + 'px';
+      canvas.style.minWidth = Math.max(code.clientWidth, (s.maxLineLength + 12) * 7.3) + 'px';
+      if (options.position?.source === s.side) { code.scrollTop = options.position.top; code.scrollLeft = options.position.left; }
+      else scrollLogTo(state, s.frame?.anchors[0]?.line || s.line);
+      code.onscroll = () => { if (!state.scheduled) { state.scheduled = true; requestAnimationFrame(() => { state.scheduled = false; loadLogWindow(state); }); } };
+      loadLogWindow(state, true).then(() => { if (!options.position && s.frame) revealByte(index + ':6'); });
+      return state;
+    });
     $('codeSections').scrollTop = 0;
-    d.sections.forEach((s, i) => { if (s.frame) revealByte(i + ':6'); });
   }
   function renderChart() {
     if (!currentView || $('workspace').hidden) return;
@@ -284,6 +376,9 @@
     if (max <= min) max = min + 1;
     const x = i => ml + (i - c.lo) / Math.max(1, c.hi - c.lo) * (W - ml - mr);
     const y = value => mt + (max - value) / (max - min) * (H - mt - mb);
+    chartPoints = c.points.map(p => ({...p, x: x(p.index), y: y(p.sid)}));
+    svg.setAttribute('tabindex', '0');
+    svg.setAttribute('aria-label', '序号变化图，可点击普通报文查看原文，左右方向键选择相邻报文');
     let out = '<title>横轴为接收记录顺序，纵轴为消息序号</title>';
     for (let j = 0; j <= 4; j++) {
       const yy = mt + j * (H - mt - mb) / 4, value = Math.round(max - (max - min) * j / 4);
@@ -296,8 +391,18 @@
     c.points.forEach((p, i) => { const prev = c.points[i - 1]; d += (i && prev.segment === p.segment && prev.cycle === p.cycle ? 'L' : 'M') + x(p.index).toFixed(2) + ' ' + y(p.sid).toFixed(2) + ' '; });
     out += '<path d="' + d + '" stroke="#487bd2" stroke-width="1.8" fill="none" stroke-linejoin="round"/>';
     if (c.hi - c.lo < 80) for (const p of c.points) {
-      out += '<circle cx="' + x(p.index) + '" cy="' + y(p.sid) + '" r="3" fill="#fff" stroke="#487bd2"><title>序号 ' + E.hexWord(p.sid) +
-        ' / DEC ' + p.sid + ' · 原文字节 ' + E.sequenceBytes(p.sid) + ' · L' + p.line + ' · ' + shortTime(p.t) + '</title></circle>';
+      const isSelected = inspection?.source === c.side && inspection.index === p.index;
+      const title = '报文 ' + (p.index + 1) + ' · 序号 ' + E.hexWord(p.sid) + ' / DEC ' + p.sid + ' · 命令 / Key ' +
+        (E.hexByte(p.cmd) || '—') + ' / ' + (E.hexByte(p.key) || '—') + ' · L' + p.line + ' · ' + shortTime(p.t);
+      out += '<g class="chart-record" data-record-index="' + p.index + '" role="button" tabindex="-1" aria-label="' + esc(title) + '"><title>' + esc(title) +
+        '</title><rect x="' + (x(p.index) - 12) + '" y="' + (y(p.sid) - 12) + '" width="24" height="24" fill="transparent"/>' +
+        '<circle cx="' + x(p.index) + '" cy="' + y(p.sid) + '" r="' + (isSelected ? 5 : 3) + '" fill="' + (isSelected ? '#285cce' : '#fff') + '" stroke="#487bd2"/></g>';
+    }
+    const inspectedFrame = inspection?.source === c.side ? currentView.detail?.frame : null;
+    if (inspectedFrame && inspectedFrame.index >= c.lo && inspectedFrame.index <= c.hi) {
+      out += '<g class="chart-selection" pointer-events="none"><line x1="' + x(inspectedFrame.index) + '" x2="' + x(inspectedFrame.index) +
+        '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#285cce" stroke-dasharray="3 4" opacity=".5"/><circle cx="' + x(inspectedFrame.index) +
+        '" cy="' + y(inspectedFrame.sid) + '" r="5" fill="#285cce" stroke="#fff" stroke-width="1.5"/></g>';
     }
     for (const wrap of c.wraps) out += '<line x1="' + x(wrap.index) + '" x2="' + x(wrap.index) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#8295ae" stroke-dasharray="4 4"><title>' + wrap.label + ' · 记录 ' + (wrap.index + 1) + '</title></line>';
     const markerTotals = new Map(), markerSlots = new Map();
@@ -321,14 +426,15 @@
     }
     svg.innerHTML = out;
     $('chartSubtitle').textContent = '记录 ' + num(c.lo + 1) + '–' + num(c.hi + 1) + ' / ' + num(c.total);
-    $('chartHint').textContent = c.markers.some(m => m.count > 1) ? '同位置标记已合并，点击放大' : '点击标记定位原文';
+    $('chartHint').textContent = c.markers.some(m => m.count > 1) ? '普通报文可点击 · 合并异常点击放大' : '普通报文与异常均可点击 · ← / → 切换报文';
     $('focusBtn').classList.toggle('active', focused); $('fullBtn').classList.toggle('active', !focused && c.lo === 0 && c.hi === c.total - 1);
+    $('focusBtn').textContent = inspection ? '选中报文' : '异常附近';
     const span = c.hi - c.lo;
     $('chartPan').disabled = span >= c.total - 1;
     $('chartPan').value = c.total - 1 - span ? Math.round(c.lo / (c.total - 1 - span) * 1000) : 0;
     $('zoomIn').disabled = span <= 2; $('zoomOut').disabled = span >= c.total - 1;
   }
-  function select(id) { selected = id; return requestView(); }
+  function select(id) { inspection = null; detailKey = ''; selected = id; return requestView(); }
   function zoom(factor) {
     const c = currentView.chart, span = Math.max(2, Math.min(c.total - 1, Math.round((c.hi - c.lo) * factor)));
     const mid = (c.lo + c.hi) / 2, lo = Math.max(0, Math.min(c.total - span - 1, Math.round(mid - span / 2)));
@@ -350,8 +456,31 @@
   $('sequenceBase').onchange = () => { if (currentView) { renderList(); renderDetail(); renderChart(); } };
   $('codeSections').addEventListener('click', e => {
     const button = e.target.closest('[data-locate-byte]');
-    if (button) revealByte(button.dataset.locateByte, true);
+    if (button) { revealByte(button.dataset.locateByte, true); return; }
+    const section = e.target.closest('[data-log-section]'), state = section && logStates[Number(section.dataset.logSection)];
+    if (!state) return;
+    const action = e.target.closest('[data-log-action]')?.dataset.logAction;
+    if (action) {
+      const n = action === 'start' ? 1 : action === 'end' ? state.section.totalLines : action === 'selected' ? state.selectedLine : Number(section.querySelector('.log-jump').value);
+      if (!Number.isInteger(n) || n < 1 || n > state.section.totalLines) { toast('行号范围为 1–' + state.section.totalLines); return; }
+      scrollLogTo(state, n); loadLogWindow(state, true); return;
+    }
+    const line = e.target.closest('[data-log-line]');
+    if (line && window.getSelection().isCollapsed) inspectRecord({source: state.section.side, line: Number(line.dataset.logLine)}, {source: state.section.side, top: state.code.scrollTop, left: state.code.scrollLeft});
   });
+  $('codeSections').addEventListener('keydown', e => {
+    if (e.target.matches('.log-jump') && e.key === 'Enter') { e.preventDefault(); e.target.closest('.raw-section').querySelector('[data-log-action="jump"]').click(); return; }
+    const code = e.target.closest('.log-viewport');
+    if (!code || !['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
+    const state = logStates[Number(code.closest('.raw-section').dataset.logSection)];
+    const n = e.key === 'Home' ? 1 : e.key === 'End' ? state.section.totalLines : Math.max(1, Math.min(state.section.totalLines, state.selectedLine + (e.key === 'ArrowDown' ? 1 : -1)));
+    e.preventDefault(); scrollLogTo(state, n);
+    inspectRecord({source: state.section.side, line: n}, {source: state.section.side, top: code.scrollTop, left: code.scrollLeft}, true);
+  });
+  $('recordChoices').onclick = e => { const b = e.target.closest('[data-record-choice]'); if (b) inspectRecord({...inspection, index: Number(b.dataset.recordChoice)}, logStates[0] ? {source: inspection.source, top: logStates[0].code.scrollTop, left: logStates[0].code.scrollLeft} : null); };
+  $('recordPrev').onclick = () => inspectRecord({source: currentView.detail.event.source, index: currentView.detail.frame.index - 1});
+  $('recordNext').onclick = () => inspectRecord({source: currentView.detail.event.source, index: currentView.detail.frame.index + 1});
+  $('backToEvent').onclick = () => select(selected);
   document.querySelectorAll('[data-input]').forEach(b => { b.onclick = () => setInputMode(b.dataset.input); });
   for (const side of ['raw', 'filtered']) {
     const input = $(side + 'File'), zone = $(side + 'Drop');
@@ -389,8 +518,8 @@
     analyze({raw: new File([raw], '演示_abBle.txt'), filtered: new File([filtered], '演示_abFilter.txt')}, true);
   };
   document.querySelectorAll('[data-mode]').forEach(b => { b.onclick = () => changeMode(b.dataset.mode); });
-  $('kindFilter').onchange = $('commandFilter').onchange = $('coverageFilter').onchange = $('timeFrom').onchange = $('timeTo').onchange = () => { selected = ''; requestView(); };
-  $('search').oninput = () => { clearTimeout(filterTimer); filterTimer = setTimeout(() => { selected = ''; requestView(); }, 180); };
+  $('kindFilter').onchange = $('commandFilter').onchange = $('coverageFilter').onchange = $('timeFrom').onchange = $('timeTo').onchange = () => { inspection = null; selected = ''; requestView(); };
+  $('search').oninput = () => { clearTimeout(filterTimer); filterTimer = setTimeout(() => { inspection = null; selected = ''; requestView(); }, 180); };
   $('resetFilter').onclick = () => { clearFilters(); selected = ''; requestView(); };
   $('moreFilter').onclick = () => { $('extraFilters').hidden = !$('extraFilters').hidden; $('moreFilter').setAttribute('aria-expanded', String(!$('extraFilters').hidden)); };
   $('eventRows').addEventListener('click', e => { const tr = e.target.closest('[data-id]'); if (tr) select(tr.dataset.id); });
@@ -399,18 +528,38 @@
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); requestView({move: e.key === 'ArrowDown' ? 1 : -1}).then(() => $('eventRows').querySelector('[data-id="' + selected + '"]')?.focus({preventScroll: true})); }
   });
   $('chart').addEventListener('click', e => {
-    const el = e.target.closest('[data-chart-id]'); if (!el) return;
+    const el = e.target.closest('[data-chart-id]');
+    if (!el) {
+      let index = e.target.closest('[data-record-index]')?.dataset.recordIndex;
+      if (index == null) {
+        const svg = $('chart'), point = new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.getScreenCTM().inverse());
+        let best = null, distance = 24 * 24;
+        for (const p of chartPoints) { const d = (p.x - point.x) ** 2 + (p.y - point.y) ** 2; if (d <= distance) { distance = d; best = p; } }
+        index = best?.index;
+      }
+      if (index != null) inspectRecord({source: currentView.chart.side, index: Number(index)});
+      return;
+    }
     const keepFocus = document.activeElement === el;
     const m = currentView.chart.markers.find(m => m.id === el.dataset.chartId);
     if (m.count > 1) { focused = false; activeChart = {side: currentView.chart.side, lo: Math.max(0, m.lo - 3), hi: m.hi + 3}; }
-    selected = m.id; requestView().then(() => {
+    inspection = null; selected = m.id; requestView().then(() => {
       if (keepFocus) {
         const target = $('chart').querySelector('[data-chart-id="' + selected + '"]') || $('eventRows').querySelector('[data-id="' + selected + '"]');
         target?.focus({preventScroll: true});
       }
     });
   });
-  $('chart').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { const el = e.target.closest('[data-chart-id]'); if (el) { e.preventDefault(); el.dispatchEvent(new MouseEvent('click', {bubbles: true})); } } });
+  $('chart').addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault(); const c = currentView.chart, index = inspection?.source === c.side && inspection.index != null ? inspection.index : c.lo;
+      inspectRecord({source: c.side, index: Math.max(0, Math.min(c.total - 1, index + (e.key === 'ArrowRight' ? 1 : -1)))}).then(() => $('chart').focus({preventScroll: true}));
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      const el = e.target.closest('[data-chart-id], [data-record-index]'); e.preventDefault();
+      if (el) el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+      else if (currentView.chart.total) inspectRecord({source: currentView.chart.side, index: currentView.chart.lo});
+    }
+  });
   $('prevBtn').onclick = () => requestView({move: -1}); $('nextBtn').onclick = () => requestView({move: 1});
   $('pagePrev').onclick = () => requestView({page: currentView.page - 1});
   $('pageNext').onclick = () => requestView({page: currentView.page + 1});

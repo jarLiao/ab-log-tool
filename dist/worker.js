@@ -72,15 +72,26 @@ function abWorkerMain() {
         if (msg.page != null && (selectedIndex < page * pageSize || selectedIndex >= (page + 1) * pageSize)) {
           selectedIndex = page * pageSize; selected = events[selectedIndex] || null;
         }
+        let inspection = msg.inspection ? E.inspect(data, msg.inspection) : null;
+        const defaultSide = msg.mode === 'filtered' ? 'filtered' : msg.chart?.side || 'raw';
+        if (!selected && !inspection && !events.length && msg.filter?.kind === 'all' && !msg.filter.query && !msg.filter.command && !msg.filter.from && !msg.filter.to && data[defaultSide]?.lines.length) {
+          inspection = E.inspect(data, {source: defaultSide, index: 0});
+        }
         let chartOptions = msg.chart || {};
-        if (chartOptions.focus && selected) {
-          const side = selected.source;
-          chartOptions = {side, lo: Math.max(0, selected.index - 20), hi: selected.index + 20};
+        const focus = msg.inspection ? inspection?.detail.event : selected;
+        if (chartOptions.focus && focus?.index != null) {
+          const side = focus.source;
+          chartOptions = {side, lo: Math.max(0, focus.index - 20), hi: focus.index + 20};
         }
         self.postMessage({id, type: 'view', total: events.length, page, pageSize,
           selectedIndex, selected: selected?.id || '',
           items: events.slice(page * pageSize, (page + 1) * pageSize),
-          detail: E.detail(data, selected), chart: E.chart(data, msg.mode, msg.filter, chartOptions)});
+          inspection: inspection?.selection || null, detail: inspection?.detail || E.detail(data, selected), chart: E.chart(data, msg.mode, msg.filter, chartOptions)});
+      } else if (type === 'inspect') {
+        self.postMessage({id, type, ...E.inspect(data, msg.selection)});
+      } else if (type === 'logWindow') {
+        if (!data[msg.source]?.lines) throw new Error('日志来源不存在。');
+        self.postMessage({id, type, ...E.logWindow(data[msg.source], msg.first, msg.count)});
       } else if (type === 'export') {
         const events = msg.scope === 'filtered' ? getEvents(msg.mode, msg.filter) :
           [...(data.raw?.events || []), ...(data.filtered?.events || []), ...(data.pair?.events || [])];

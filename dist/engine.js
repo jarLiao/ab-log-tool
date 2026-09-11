@@ -8,7 +8,7 @@
       gap: '最终缺号', reorder: '乱序补到', duplicate: '重复记录',
       collision: '同号不同内容', parse: '解析 / 校验异常', uncertain: '序号跨度待核对', rollback: '持续回退待核对',
       rawOnly: '仅原始日志有', filteredOnly: '仅过滤日志有',
-      pairOrder: '共有帧顺序差异', pairUncertain: '配对待核对', matched: '双方都有'
+      pairOrder: '共有帧顺序差异', pairUncertain: '配对待核对', matched: '双方都有', record: '报文记录', logLine: '原始日志行'
     };
     const crcTable = Uint16Array.from({length: 256}, (_, n) => {
       let c = n << 8;
@@ -41,7 +41,7 @@
     function parse(text, name = '日志.txt', side = 'raw', progress = () => {}) {
       const lines = text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/);
       if (lines.at(-1) === '') lines.pop();
-      const result = {name, side, lines, rows: [], events: [], diagnostics: 0, dataLines: 0, wraps: 0, segments: 0};
+      const result = {name, side, lines, rows: [], events: [], diagnostics: 0, dataLines: 0, wraps: 0, segments: 0, maxLineLength: 0};
       let buf = new Uint8Array(131088), begin = 0, end = 0, absolute = 0;
       let marks = [], markCursor = 0, noiseStart = -1, noiseEnd = -1, noiseCount = 0;
       const word = p => buf[p] | (buf[p + 1] << 8);
@@ -128,6 +128,7 @@
         drain();
       }
       for (let i = 0; i < lines.length; i++) {
+        result.maxLineLength = Math.max(result.maxLineLength, lines[i].length);
         const s = lines[i].trim();
         if (s) {
           const match = /^(\d{10,16})\s*[,，]\s*(.*)$/.exec(s);
@@ -330,7 +331,7 @@
     }
     function summary(s) {
       return {name: s.name, side: s.side, bytes: s.bytes, encoding: s.encoding, counts: s.counts,
-        lineCount: s.lines.length, diagnostics: s.diagnostics, dataLines: s.dataLines,
+        lineCount: s.lines.length, maxLineLength: s.maxLineLength, diagnostics: s.diagnostics, dataLines: s.dataLines,
         minTime: s.minTime, maxTime: s.maxTime, firstSid: s.rows[0]?.sid ?? null, lastSid: s.rows.at(-1)?.sid ?? null,
         wraps: s.wraps, segments: s.segments, segmentRanges: s.segmentRanges};
     }
@@ -382,7 +383,7 @@
     }
     function frameInfo(s, row) {
       if (!row) return null;
-      return {sid: row.sid, sidHex: hexWord(row.sid), seqBytes: sequenceBytes(row.sid),
+      return {index: row.index, line: row.line, endLine: row.endLine, total: s.rows.length, sid: row.sid, sidHex: hexWord(row.sid), seqBytes: sequenceBytes(row.sid),
         cmd: hexByte(row.cmd), key: hexByte(row.key), cycle: row.cycle, segment: row.segment,
         length: row.bodyLength + 8, t: timestamp(row.t), hex: row.hex.slice(0, 512), truncated: row.hex.length > 512,
         header: row.hex.slice(0, 16).toUpperCase().match(/../g), anchors: sequenceSource(s, row)};
@@ -410,15 +411,48 @@
       const sections = [];
       const add = (side, line, endLine, description, row) => {
         const frame = frameInfo(data[side], row);
-        sections.push({name: data[side].name, side, line, endLine, description, frame,
+        sections.push({name: data[side].name, side, line, endLine, totalLines: data[side].lines.length, maxLineLength: data[side].maxLineLength, description, frame,
           lines: context(data[side], line, endLine, 5, frame?.anchors.map(a => a.line) || [])});
       };
-      const row = e.kind === 'parse' ? null : data[e.source].rows[e.index];
+      const row = ['parse', 'logLine'].includes(e.kind) ? null : data[e.source].rows[e.index];
       add(e.source, e.line, e.endLine, e.kind === 'gap' ? '缺号范围之后的报文' : '当前记录', row);
       if (e.relatedSource) add(e.relatedSource, e.relatedLine, e.relatedEndLine,
         e.kind === 'gap' ? '缺号范围之前的报文' : '关联记录', data[e.relatedSource].rows[e.relatedIndex]);
       if (e.anchorSource) { const r = data[e.anchorSource].rows[e.anchorIndex]; add(e.anchorSource, r.line, r.endLine, '顺序参照帧', r); }
       return {event: e, description: descriptions(e, data), sections, frame: sections[0].frame};
+    }
+    function framesAtLine(s, line) {
+      // A diagnostic between two fragments is not part of their byte stream.
+      const m = /^\s*\d{10,16}\s*[,，]\s*([\da-f\s]+)$/i.exec(s.lines[line - 1] || '');
+      if (!m || m[1].replace(/\s/g, '').length % 2) return [];
+      let lo = 0, hi = s.rows.length;
+      while (lo < hi) { const mid = (lo + hi) >>> 1; if (s.rows[mid].endLine < line) lo = mid + 1; else hi = mid; }
+      const matches = [];
+      for (let i = lo; i < s.rows.length && s.rows[i].line <= line; i++) matches.push(s.rows[i]);
+      return matches;
+    }
+    function inspect(data, selection) {
+      const s = data[selection?.source];
+      if (!s?.lines.length) return null;
+      let row = Number.isInteger(selection.index) ? s.rows[selection.index] : null;
+      let line = Math.max(1, Math.min(s.lines.length, Number(selection.line) || row?.line || 1));
+      const candidates = framesAtLine(s, line);
+      if (!row || row.line > line || row.endLine < line || !candidates.includes(row)) row = candidates[0];
+      const e = {kind: row ? 'record' : 'logLine', id: row ? 'B' + (s.side === 'raw' ? 'R' : 'F') + String(row.index + 1).padStart(6, '0') : 'L' + line,
+        source: s.side, index: row?.index, line: row?.line || line, endLine: row?.endLine || line,
+        t: row?.t ?? null, sid: row?.sid, cmd: row?.cmd, key: row?.key, segment: row?.segment, cycle: row?.cycle,
+        reason: row ? '第 ' + (row.index + 1) + ' / ' + s.rows.length + ' 条有效报文，CRC16 校验通过。浏览报文不改变异常统计。' :
+          '该行没有对应的完整有效报文。保留原文，清空序号、命令 / Key 等解析字段。'};
+      const d = detail(data, e);
+      d.selectedLine = line;
+      d.choices = candidates.map(r => ({index: r.index, sid: r.sid, cmd: r.cmd, key: r.key}));
+      return {selection: {source: s.side, index: row?.index ?? null, line}, detail: d};
+    }
+    function logWindow(s, first = 1, count = 60) {
+      const start = Math.max(1, Math.min(s.lines.length || 1, Math.floor(Number(first) || 1)));
+      const length = Math.max(1, Math.min(160, Math.floor(Number(count) || 60)));
+      return {side: s.side, total: s.lines.length, first: start,
+        lines: s.lines.slice(start - 1, start - 1 + length).map((text, i) => ({n: start + i, text}))};
     }
     function chart(data, mode, filter, opts = {}) {
       const side = mode === 'pair' ? opts.side || 'raw' : mode, s = data[side], rows = s.rows;
@@ -435,7 +469,7 @@
         }
         for (const j of [...new Set([a, mn, mx, b])].sort((x, y) => x - y)) {
           const r = rows[j];
-          points.push({index: j, sid: r.sid, line: r.line, t: r.t, segment: r.segment, cycle: r.cycle});
+          points.push({index: j, sid: r.sid, line: r.line, t: r.t, cmd: r.cmd, key: r.key, segment: r.segment, cycle: r.cycle});
         }
       }
       const grouped = new Map();
@@ -494,7 +528,7 @@
           if (index != null) {
             const row = s.rows[index];
             chunk += '报文序号：' + hexWord(row.sid) + ' = ' + row.sid + '（十进制）；原始字节：' + sequenceBytes(row.sid) +
-              '（小端，AB 帧内偏移 6、7）\r\n';
+              '（小端，AB 帧内偏移 6、7）\r\n命令 / Key：' + (hexByte(row.cmd) || '—') + ' / ' + (hexByte(row.key) || '—') + '\r\n';
           }
           for (let n = Math.max(1, start - 5); n <= Math.min(s.lines.length, end + 5); n++) {
             chunk += 'L' + n + '  ' + s.lines[n - 1] + '\r\n';
@@ -507,7 +541,7 @@
       return out;
     }
     return {parse, compare, summary, crc16, makeFrame, names, title, label, timestamp,
-      selectEvents, detail, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource};
+      selectEvents, detail, inspect, framesAtLine, logWindow, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource};
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = createEngine();
   else { root.ABEngineFactory = createEngine; root.ABEngine = createEngine(); }
