@@ -34,7 +34,7 @@
       <button class="navbtn" data-mode="pair" disabled><svg class="ico"><use href="#i-compare"/></svg>配对比较</button>
     </nav>
     <div id="sourceNote" class="file-note">导入一份日志独立分析，或导入同一次连接的两份日志进行比较。</div>
-    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>刷新或关闭页面后清除</span><span class="version">v1.0 · 网页工具</span></div>
+    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>刷新或关闭页面后清除</span><span class="version">v1.1 · 网页工具</span></div>
   </aside>
   <main class="main">
     <header class="topbar">
@@ -55,7 +55,7 @@
       <section id="stats" class="stats" aria-label="分析统计"></section>
       <section class="panel chart-panel" aria-label="序号变化图">
         <div class="panel-head"><div class="head-inline"><h3>序号变化</h3><span id="chartSubtitle" class="small"></span></div>
-          <div class="chart-controls"><select id="chartSide" aria-label="图表日志来源" hidden><option value="raw">原始接收</option><option value="filtered">过滤之后</option></select><button id="zoomIn" class="button compact" aria-label="放大图表">＋</button><button id="zoomOut" class="button compact" aria-label="缩小图表">−</button><div class="segmented"><button id="focusBtn" class="active">异常附近</button><button id="fullBtn">查看全程</button></div></div>
+          <div class="chart-controls"><label class="base-control">序号显示<select id="sequenceBase" aria-label="序号显示进制"><option value="hex">HEX 优先</option><option value="dec">十进制优先</option></select></label><select id="chartSide" aria-label="图表日志来源" hidden><option value="raw">原始接收</option><option value="filtered">过滤之后</option></select><button id="zoomIn" class="button compact" aria-label="放大图表">＋</button><button id="zoomOut" class="button compact" aria-label="缩小图表">−</button><div class="segmented"><button id="focusBtn" class="active">异常附近</button><button id="fullBtn">查看全程</button></div></div>
         </div>
         <div class="chart-body"><svg id="chart" class="chart-svg" role="group" aria-label="按接收顺序展示序号；标记可点击，异常列表提供文字与键盘访问"></svg></div>
         <div class="chart-legend"><div class="legend-items"><span>— 序号</span><span class="gap-text">△ 缺号</span><span class="reorder-text">◇ 乱序</span><span class="duplicate-text">□ 重复</span><span class="collision-text">× 同号异内容</span><span>│ 正常回绕 / 待核对分段</span></div><span id="chartHint"></span></div>
@@ -64,9 +64,9 @@
       <div class="workbench">
         <section class="panel result-panel" aria-label="异常和差异列表">
           <div class="panel-head"><div class="head-inline"><h3 id="resultTitle">异常列表</h3><span id="resultCount" class="pill"></span></div><div class="actions"><button id="prevBtn" class="button compact" aria-label="上一条记录"><svg class="ico"><use href="#i-left"/></svg></button><button id="nextBtn" class="button compact" aria-label="下一条记录"><svg class="ico"><use href="#i-right"/></svg></button></div></div>
-          <div class="result-toolbar"><label class="search"><svg class="ico"><use href="#i-search"/></svg><input id="search" type="search" aria-label="搜索序号、源行、时间或命令" placeholder="序号 / L行号 / 时间 / 命令"></label><select id="kindFilter" aria-label="记录类型"></select><select id="commandFilter" aria-label="命令筛选"><option value="">全部命令</option></select><button id="moreFilter" class="button compact" aria-expanded="false">更多筛选</button></div>
+          <div class="result-toolbar"><label class="search"><svg class="ico"><use href="#i-search"/></svg><input id="search" type="search" aria-label="搜索序号、源行、时间或命令" placeholder="0x8404 / 33796 / L行号"></label><select id="kindFilter" aria-label="记录类型"></select><select id="commandFilter" aria-label="命令筛选"><option value="">全部命令</option></select><button id="moreFilter" class="button compact" aria-expanded="false">更多筛选</button></div>
           <div id="extraFilters" class="extra-filters" hidden><label>起始时间<input id="timeFrom" type="datetime-local" step="0.001"></label><label>结束时间<input id="timeTo" type="datetime-local" step="0.001"></label><label id="coverageLabel" hidden>覆盖范围<select id="coverageFilter"><option value="all">全部范围</option><option value="inside">共有范围内</option><option value="outside">共有范围外</option><option value="unknown">无共有范围</option></select></label><button id="resetFilter" class="button compact">清除筛选</button><span class="small">时间为北京时间；筛选只影响展示</span></div>
-          <div class="table-wrap"><table class="result-table"><thead><tr><th>类型</th><th>序号 / 范围</th><th id="countHead">数量</th><th>源行</th></tr></thead><tbody id="eventRows"></tbody></table><div class="empty" id="empty" hidden></div></div>
+          <div class="table-wrap"><table class="result-table"><thead><tr><th>类型</th><th id="sequenceHead">序号 HEX / DEC</th><th id="countHead">数量</th><th>源行</th></tr></thead><tbody id="eventRows"></tbody></table><div class="empty" id="empty" hidden></div></div>
           <div class="table-footer"><span id="listFooter"></span><div class="pagination"><button id="pagePrev" class="button compact" aria-label="上一页">上一页</button><span id="pageInfo"></span><button id="pageNext" class="button compact" aria-label="下一页">下一页</button></div></div>
         </section>
         <section class="panel inspector" aria-label="异常详情和原文">
@@ -103,6 +103,7 @@
 </dialog>
 <dialog id="aboutDialog"><div class="dialog-heading"><h2>判定说明</h2><button class="button compact" data-close>关闭</button></div>
   <ul class="rules"><li>按源日志的记录顺序分析，所有命令共用一个 16 位序号。</li><li>先跳号、后补到的报文列为“乱序补到”；只有完整分析后仍未出现的序号列为“最终缺号”。文件首尾范围之外不补缺号。</li><li>同一周期同号且完整帧相同为重复；同号但内容不同单独列示。65535 → 0 为正常回绕。</li><li>周期按距离最近的序号推进方向解释。恰好相差半周期，或向当前观测范围之前倒退超过 4096 个序号时，列为“跨度待核对”，不推算跨段缺号。较小范围的开头补到仍参与同段统计。日志必须来自同一次连续连接；跨多次回绕的极端迟到或跨度无法仅凭序号唯一还原。</li><li>支持分片与一行多帧。只有完整帧且 CRC16 校验通过的序号参与统计。无法解析的记录保留原文。</li><li>缺号描述本日志的缺口，不直接等于蓝牙丢包。过滤后的缺号可能来自正常过滤。</li><li>配对依据原始接收时间戳与完整帧，逐次匹配，并显示出现次数及顺序差异；相同时间戳、相同帧的重复对应关系列为待核对。比较只呈现事实，不推测过滤原因。</li><li>图表概览保留每段最高与最低点，同位置的异常标记显示数量。放大或从列表逐条查看；所有异常均参与统计和导出。</li><li>文件保留在当前页面的内存中。没有日志上传、在线接口或外部统计；刷新或关闭页面后清除。</li></ul>
+  <p class="small">序号默认同时显示 HEX 和十进制；AB 帧内偏移 6、7（第 7、8 字节）是序号，低字节在前。例如原文 04 84 = 0x8404 = 十进制 33796。选中记录后，黄色标记指出对应的原始字节；缺号仅高亮前后实际存在的报文。</p>
   <p class="small">日志格式：毫秒时间戳,十六进制报文。命令取消息体首字节，Key 仅展示消息体偏移 2 的可用值，具体含义以命令结构为准。</p>
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

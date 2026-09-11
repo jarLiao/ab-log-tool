@@ -21,6 +21,8 @@
     }
     const mod = n => ((n % MOD) + MOD) % MOD;
     const hexByte = n => n == null ? '' : '0x' + n.toString(16).padStart(2, '0').toUpperCase();
+    const hexWord = n => n == null ? '' : '0x' + mod(n).toString(16).padStart(4, '0').toUpperCase();
+    const sequenceBytes = n => n == null ? '' : hexByte(n & 255).slice(2) + ' ' + hexByte((n >>> 8) & 255).slice(2);
     const toHex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
     function makeFrame(sid, body = [0x7b, 3, 0x12, 0], props = 0) {
       const bytes = Uint8Array.from([0xab, props, body.length & 255, body.length >>> 8, 0, 0, sid & 255, sid >>> 8, ...body]);
@@ -95,10 +97,16 @@
             consume(1);
             continue;
           }
-          const a = locate(absolute + begin), b = locate(absolute + finish - 1);
+          const a = locate(absolute + begin);
+          const low = locate(absolute + begin + 6);
+          const lowLine = low.line, lowOffset = absolute + begin + 6 - low.start;
+          const high = locate(absolute + begin + 7);
+          const highLine = high.line, highOffset = absolute + begin + 7 - high.start;
+          const b = locate(absolute + finish - 1);
           result.rows.push({index: result.rows.length, line: a.line, endLine: b.line, t: a.t,
             sid: word(begin + 6), props: buf[begin + 1], cmd: bodyLength ? buf[begin + 8] : null,
             key: bodyLength >= 3 ? buf[begin + 10] : null, bodyLength,
+            seqLowLine: lowLine, seqLowOffset: lowOffset, seqHighLine: highLine, seqHighOffset: highOffset,
             hex: toHex(buf.subarray(begin, finish))});
           begin = finish;
         }
@@ -298,6 +306,8 @@
     }
     function title(e) { return names[e.kind] || e.kind; }
     function label(e) { return e.kind === 'gap' ? e.from === e.to ? String(e.from) : e.from + '–' + e.to : e.sid == null ? '—' : String(e.sid); }
+    function hexLabel(e) { return e.kind === 'gap' ? e.from === e.to ? hexWord(e.from) : hexWord(e.from) + '–' + hexWord(e.to) : hexWord(e.sid) || '—'; }
+    function dualLabel(e) { return hexLabel(e) + '（DEC ' + label(e) + '）'; }
     function descriptions(e, data) {
       let text = e.reason || '';
       if (e.kind === 'gap' && e.source === 'filtered') text += ' 过滤日志的缺号可能来自正常过滤。';
@@ -322,10 +332,42 @@
             .some(v => String(v).toLowerCase().includes(q));
       });
     }
-    function context(s, start, end, radius = 5) {
+    function sequenceSource(s, row) {
+      if (!row) return [];
+      return [[row.seqLowLine, row.seqLowOffset, 6], [row.seqHighLine, row.seqHighOffset, 7]].map(([line, offset, frameOffset]) => {
+        const text = s.lines[line - 1];
+        const prefix = /^\s*\d{10,16}\s*[,，]\s*/.exec(text);
+        if (!prefix) throw new Error('无法定位序号原始字节。');
+        let nibble = 0, start = -1, end = -1;
+        for (let i = prefix[0].length; i < text.length; i++) {
+          if (/\s/.test(text[i])) continue;
+          if (nibble === offset * 2) start = i;
+          if (nibble === offset * 2 + 1) { end = i + 1; break; }
+          nibble++;
+        }
+        if (start < 0 || end < 0) throw new Error('序号原文位置超出记录范围。');
+        return {line, start, end, frameOffset, role: frameOffset === 6 ? '低字节' : '高字节',
+          value: row.hex.slice(frameOffset * 2, frameOffset * 2 + 2).toUpperCase()};
+      });
+    }
+    function frameInfo(s, row) {
+      if (!row) return null;
+      return {sid: row.sid, sidHex: hexWord(row.sid), seqBytes: sequenceBytes(row.sid),
+        cmd: hexByte(row.cmd), key: hexByte(row.key), cycle: row.cycle, segment: row.segment,
+        length: row.bodyLength + 8, t: timestamp(row.t), hex: row.hex.slice(0, 512), truncated: row.hex.length > 512,
+        header: row.hex.slice(0, 16).toUpperCase().match(/../g), anchors: sequenceSource(s, row)};
+    }
+    function context(s, start, end, radius = 5, anchorLines = []) {
       const lo = Math.max(1, start - radius), hi = Math.min(s.lines.length, end + radius);
       // A single fragmented frame can span thousands of source lines; show both ends and disclose the omitted middle.
-      const spans = hi - lo > 100 ? [[lo, lo + 39], [hi - 39, hi]] : [[lo, hi]];
+      const candidates = hi - lo > 100 ? [[lo, lo + 39], [hi - 39, hi],
+        ...anchorLines.map(n => [Math.max(lo, n - 2), Math.min(hi, n + 2)])] : [[lo, hi]];
+      candidates.sort((a, b) => a[0] - b[0]);
+      const spans = [];
+      for (const range of candidates) {
+        if (spans.length && range[0] <= spans.at(-1)[1] + 1) spans.at(-1)[1] = Math.max(spans.at(-1)[1], range[1]);
+        else spans.push(range);
+      }
       const out = [];
       for (let p = 0; p < spans.length; p++) {
         if (p) out.push({n: null, text: '… 中间 ' + (spans[p][0] - spans[p - 1][1] - 1) + ' 行已折叠；TXT 导出保留全部相关行 …'});
@@ -336,17 +378,17 @@
     function detail(data, e) {
       if (!e) return null;
       const sections = [];
-      const add = (side, line, endLine, description) => {
-        sections.push({name: data[side].name, side, line, endLine, description, lines: context(data[side], line, endLine)});
+      const add = (side, line, endLine, description, row) => {
+        const frame = frameInfo(data[side], row);
+        sections.push({name: data[side].name, side, line, endLine, description, frame,
+          lines: context(data[side], line, endLine, 5, frame?.anchors.map(a => a.line) || [])});
       };
-      add(e.source, e.line, e.endLine, '当前记录');
-      if (e.relatedSource) add(e.relatedSource, e.relatedLine, e.relatedEndLine, e.kind === 'gap' ? '序号范围另一侧' : '关联记录');
-      if (e.anchorSource) { const r = data[e.anchorSource].rows[e.anchorIndex]; add(e.anchorSource, r.line, r.endLine, '顺序参照帧'); }
       const row = e.kind === 'parse' ? null : data[e.source].rows[e.index];
-      return {event: e, description: descriptions(e, data), sections, frame: row ? {
-        sid: row.sid, cmd: hexByte(row.cmd), key: hexByte(row.key), cycle: row.cycle,
-        segment: row.segment, length: row.bodyLength + 8, t: timestamp(row.t), hex: row.hex.slice(0, 512), truncated: row.hex.length > 512
-      } : null};
+      add(e.source, e.line, e.endLine, e.kind === 'gap' ? '缺号范围之后的报文' : '当前记录', row);
+      if (e.relatedSource) add(e.relatedSource, e.relatedLine, e.relatedEndLine,
+        e.kind === 'gap' ? '缺号范围之前的报文' : '关联记录', data[e.relatedSource].rows[e.relatedIndex]);
+      if (e.anchorSource) { const r = data[e.anchorSource].rows[e.anchorIndex]; add(e.anchorSource, r.line, r.endLine, '顺序参照帧', r); }
+      return {event: e, description: descriptions(e, data), sections, frame: sections[0].frame};
     }
     function chart(data, mode, filter, opts = {}) {
       const side = mode === 'pair' ? opts.side || 'raw' : mode, s = data[side], rows = s.rows;
@@ -375,7 +417,7 @@
         const key = bin + ':' + e.kind;
         const current = grouped.get(key);
         if (current) { current.count++; current.hi = Math.max(current.hi, index); }
-        else grouped.set(key, {id: e.id, kind: e.kind, index, sid: rows[index].sid, count: 1, lo: index, hi: index, label: title(e) + ' ' + label(e)});
+        else grouped.set(key, {id: e.id, kind: e.kind, index, sid: rows[index].sid, count: 1, lo: index, hi: index, label: title(e) + ' ' + dualLabel(e)});
       }
       const wraps = [];
       for (let i = lo; i <= hi; i++) if (rows[i].wrap || i > 0 && rows[i].segment !== rows[i - 1].segment) wraps.push({
@@ -391,13 +433,14 @@
       };
       if (type === 'csv') {
         const out = ['\uFEFF' + ['异常编号', '记录类型', '来源文件', '起始行', '结束行', '关联文件', '关联起始行', '关联结束行',
-          '接收时间', '毫秒时间戳', '消息序号', '命令', 'Key', '可分析段', '序号周期', '缺号起始', '缺号结束', '缺号数量', '覆盖范围', '说明', '导出范围'].map(cell).join(',') + '\r\n'];
+          '接收时间', '毫秒时间戳', '消息序号', '命令', 'Key', '可分析段', '序号周期', '缺号起始', '缺号结束', '缺号数量', '覆盖范围', '说明', '导出范围',
+          '消息序号HEX', '序号原始字节LE', '缺号起始HEX', '缺号结束HEX'].map(cell).join(',') + '\r\n'];
         let chunk = '';
         for (const e of events) {
           chunk += [e.id, title(e), data[e.source].name, e.line, e.endLine, e.relatedSource ? data[e.relatedSource].name : '',
             e.relatedLine, e.relatedEndLine, timestamp(e.t), e.t, e.sid, hexByte(e.cmd), hexByte(e.key), e.segment, e.cycle,
             e.from, e.to, e.count, e.coverage === 'inside' ? '共有范围内' : e.coverage === 'outside' ? '共有范围外' : e.coverage === 'unknown' ? '无共有范围' : '',
-            descriptions(e, data), scope].map(cell).join(',') + '\r\n';
+            descriptions(e, data), scope, hexWord(e.sid), sequenceBytes(e.sid), hexWord(e.from), hexWord(e.to)].map(cell).join(',') + '\r\n';
           if (chunk.length > 262144) { out.push(chunk); chunk = ''; }
         }
         if (chunk) out.push(chunk);
@@ -407,13 +450,18 @@
         '\r\n序号按完整文件、源行顺序计算；缺号不直接等于通信丢包。\r\n\r\n'];
       let chunk = '';
       for (const e of events) {
-        chunk += '[' + e.id + '] ' + title(e) + ' ' + label(e) + '\r\n' + descriptions(e, data) + '\r\n';
-        const spans = [[e.source, e.line, e.endLine]];
-        if (e.relatedSource) spans.push([e.relatedSource, e.relatedLine, e.relatedEndLine]);
-        if (e.anchorSource) { const r = data[e.anchorSource].rows[e.anchorIndex]; spans.push([e.anchorSource, r.line, r.endLine]); }
-        for (const [side, start, end] of spans) {
+        chunk += '[' + e.id + '] ' + title(e) + ' ' + dualLabel(e) + '\r\n' + descriptions(e, data) + '\r\n';
+        const spans = [[e.source, e.line, e.endLine, e.kind === 'parse' ? null : e.index]];
+        if (e.relatedSource) spans.push([e.relatedSource, e.relatedLine, e.relatedEndLine, e.relatedIndex]);
+        if (e.anchorSource) { const r = data[e.anchorSource].rows[e.anchorIndex]; spans.push([e.anchorSource, r.line, r.endLine, r.index]); }
+        for (const [side, start, end, index] of spans) {
           const s = data[side];
           chunk += s.name + '（L' + start + '–L' + end + '）\r\n';
+          if (index != null) {
+            const row = s.rows[index];
+            chunk += '报文序号：' + hexWord(row.sid) + ' = ' + row.sid + '（十进制）；原始字节：' + sequenceBytes(row.sid) +
+              '（小端，AB 帧内偏移 6、7）\r\n';
+          }
           for (let n = Math.max(1, start - 5); n <= Math.min(s.lines.length, end + 5); n++) {
             chunk += 'L' + n + '  ' + s.lines[n - 1] + '\r\n';
             if (chunk.length > 262144) { out.push(chunk); chunk = ''; }
@@ -425,7 +473,7 @@
       return out;
     }
     return {parse, compare, summary, crc16, makeFrame, names, title, label, timestamp,
-      selectEvents, detail, chart, descriptions, exportParts, hexByte};
+      selectEvents, detail, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource};
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = createEngine();
   else { root.ABEngineFactory = createEngine; root.ABEngine = createEngine(); }

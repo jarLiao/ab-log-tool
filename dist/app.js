@@ -6,6 +6,11 @@
   const num = value => Number(value || 0).toLocaleString('zh-CN');
   const bytes = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(1) + ' KB';
   const shortTime = t => E.timestamp(t).slice(11, 23);
+  const useHex = () => $('sequenceBase').value === 'hex';
+  function sequenceMarkup(e) {
+    const main = useHex() ? E.hexLabel(e) : E.label(e), secondary = useHex() ? 'DEC ' + E.label(e) : 'HEX ' + E.hexLabel(e);
+    return '<span class="seq-primary mono">' + main + '</span><span class="seq-secondary mono">' + secondary + '</span>';
+  }
   const colors = {gap: '#a34f05', reorder: '#067d75', duplicate: '#366cb4', collision: '#7743ad',
     parse: '#b13d38', uncertain: '#b13d38', rawOnly: '#a34f05', filteredOnly: '#366cb4', pairOrder: '#067d75', pairUncertain: '#7743ad', matched: '#067d75'};
   let worker, pending = new Map(), requestId = 0, renderId = 0, meta = null;
@@ -173,9 +178,10 @@
   }
   function renderList() {
     const v = currentView;
+    $('sequenceHead').textContent = useHex() ? '序号 HEX / DEC' : '序号 DEC / HEX';
     $('eventRows').innerHTML = v.items.map(e => '<tr tabindex="0" data-id="' + e.id + '" class="' + (e.id === selected ? 'selected' : '') +
       '" aria-selected="' + (e.id === selected) + '"><td><span class="tag ' + e.kind + '">' + E.title(e) +
-      '</span></td><td class="mono">' + E.label(e) + '</td><td class="mono">' +
+      '</span></td><td class="sequence-cell">' + sequenceMarkup(e) + '</td><td class="mono">' +
       (mode === 'pair' ? e.coverage === 'inside' ? '共有范围内' : e.coverage === 'outside' ? '共有范围外' : '无共有范围' : e.kind === 'gap' ? num(e.count) : '—') +
       '</td><td class="mono">' + (mode === 'pair' ? e.source === 'raw' ? '原 ' : '滤 ' : '') + 'L' + e.line +
       (e.endLine !== e.line ? '–' + e.endLine : '') + '</td></tr>').join('');
@@ -189,6 +195,44 @@
     $('prevBtn').disabled = !v.total || v.selectedIndex === 0;
     $('nextBtn').disabled = !v.total || v.selectedIndex === v.total - 1;
   }
+  function rawMarkup(line, anchors, sectionIndex) {
+    const ranges = anchors.filter(a => a.line === line.n).sort((a, b) => a.start - b.start);
+    let out = '', cursor = 0;
+    for (const a of ranges) {
+      out += esc(line.text.slice(cursor, a.start)) + '<mark class="seq-byte-mark" tabindex="-1" data-source-byte="' +
+        sectionIndex + ':' + a.frameOffset + '" title="序号' + a.role + ' · AB 帧内偏移 ' + a.frameOffset +
+        ' · 原文 L' + a.line + ' 第 ' + (a.start + 1) + '–' + a.end + ' 列">' +
+        esc(line.text.slice(a.start, a.end)) + '</mark>';
+      cursor = a.end;
+    }
+    return out + esc(line.text.slice(cursor));
+  }
+  function frameAnchor(frame, index) {
+    if (!frame) return '';
+    const h = frame.header;
+    return '<div class="sequence-anchor"><div class="sequence-map"><span>原文字节</span><strong class="mono source-value">' +
+      frame.seqBytes + '</strong><span>→</span><strong class="mono">' + frame.sidHex + '</strong><span class="mono">DEC ' + frame.sid +
+      '</span><button class="byte-jump" data-locate-byte="' + index + ':6">定位字节</button></div><div class="frame-header">' +
+      [['帧头', h[0]], ['属性', h[1]], ['长度', h.slice(2, 4).join(' ')], ['CRC', h.slice(4, 6).join(' ')]].map(([label, value]) =>
+        '<span class="header-slot"><small>' + label + '</small><span class="mono">' + value + '</span></span>').join('') +
+      '<span class="header-slot sequence-slot"><small>序号 · 低 → 高</small><span class="sequence-byte-buttons">' +
+      frame.anchors.map(a => '<button class="mono" data-locate-byte="' + index + ':' + a.frameOffset + '" title="定位序号' + a.role +
+        '，原文 L' + a.line + ' 第 ' + (a.start + 1) + ' 列">' + a.value + '</button>').join('') +
+      '</span></span></div><div class="byte-caption">AB 第 7、8 字节 · 偏移 6、7 · 小端：低字节在前</div></div>';
+  }
+  function revealByte(target, scrollSection = false) {
+    const mark = $('codeSections').querySelector('[data-source-byte="' + target + '"]');
+    if (!mark) return;
+    const code = mark.closest('.code'), box = code.getBoundingClientRect(), at = mark.getBoundingClientRect();
+    if (at.left < box.left + 60 || at.right > box.right - 12) code.scrollLeft += at.left - box.left - 85;
+    if (at.top < box.top + 5 || at.bottom > box.bottom - 5) code.scrollTop += at.top - box.top - 36;
+    if (scrollSection) {
+      const parent = $('codeSections');
+      const location = mark.getBoundingClientRect(), viewport = parent.getBoundingClientRect();
+      if (location.top < viewport.top + 8 || location.bottom > viewport.bottom - 8) parent.scrollTop += location.top - viewport.top - 70;
+      mark.focus({preventScroll: true});
+    }
+  }
   function renderDetail() {
     const d = currentView.detail; $('copyBtn').disabled = !d;
     if (!d) {
@@ -197,26 +241,29 @@
     }
     const e = d.event;
     $('eventID').textContent = e.id;
-    $('detailTitle').innerHTML = '<span class="tag ' + e.kind + '">' + E.title(e) + '</span> <span class="mono">' + E.label(e) + '</span>';
+    $('detailTitle').innerHTML = '<span class="tag ' + e.kind + '">' + E.title(e) + '</span> <span class="detail-sequence">' + sequenceMarkup(e) + '</span>';
     $('detailSummary').textContent = d.description;
     const fields = [['源行范围', 'L' + e.line + (e.endLine !== e.line ? '–L' + e.endLine : '')],
       ['接收时间', E.timestamp(e.t)], ['命令 / Key', d.frame ? d.frame.cmd + ' / ' + (d.frame.key || '—') : '不可可靠解析'],
       ['可分析段 / 序号周期', d.frame ? d.frame.segment + ' / ' + d.frame.cycle : '—']];
     $('fields').innerHTML = fields.map(([a, b]) => '<div class="field"><span>' + a + '</span><strong class="mono">' + esc(b) + '</strong></div>').join('');
-    $('codeSections').innerHTML = d.sections.map(s => '<div class="code-name">' + s.description + ' · ' + esc(s.name) +
-      ' · L' + s.line + (s.endLine !== s.line ? '–L' + s.endLine : '') + '</div><div class="code" tabindex="0" aria-label="' + esc(s.description + ' 原始日志片段') + '">' +
+    $('codeSections').innerHTML = d.sections.map((s, index) => '<section class="raw-section"><div class="code-name">' + s.description + ' · ' + esc(s.name) +
+      ' · L' + s.line + (s.endLine !== s.line ? '–L' + s.endLine : '') + '</div>' + frameAnchor(s.frame, index) +
+      '<div class="code" tabindex="0" aria-label="' + esc(s.description + ' 原始日志片段') + '">' +
       s.lines.map(l => '<div class="code-line ' + (l.highlight ? 'highlight' : '') + ' ' + (/error|reorder_skip/i.test(l.text) ? 'diagnostic' : '') + '"><span class="ln">' +
-        (l.n ?? '…') + '</span><code>' + esc(l.text) + '</code></div>').join('') + '</div>').join('');
-    contextText = '[' + e.id + '] ' + E.title(e) + ' ' + E.label(e) + '\n' + d.description + '\n\n' +
-      d.sections.map(s => s.name + '\n' + s.lines.map(l => (l.n == null ? '' : 'L' + l.n + '  ') + l.text).join('\n')).join('\n\n');
-    $('contextNote').textContent = '原文保留真实行号，默认显示前后各 5 行。' +
-      (e.kind === 'gap' ? '缺失序号没有原始报文，上方列出两侧实际存在的记录。' : '重复、同号不同内容及已匹配记录同时列出关联原文。');
+        (l.n ?? '…') + '</span><code>' + rawMarkup(l, s.frame?.anchors || [], index) + '</code></div>').join('') + '</div></section>').join('');
+    contextText = '[' + e.id + '] ' + E.title(e) + ' ' + E.dualLabel(e) + '\n' + d.description + '\n\n' +
+      d.sections.map(s => s.name + '\n' + (s.frame ? '原文字节 ' + s.frame.seqBytes + ' → ' + s.frame.sidHex + ' = DEC ' + s.frame.sid + '（小端）\n' : '') +
+        s.lines.map(l => (l.n == null ? '' : 'L' + l.n + '  ') + l.text).join('\n')).join('\n\n');
+    $('contextNote').textContent = '黄色字节与上方序号对应，原始文字保持不变。' +
+      (e.kind === 'gap' ? '缺号没有原始报文；这里只高亮缺号范围前后实际存在的序号。' : '点击帧头中的低 / 高字节，可定位跨行或同一行多帧中的准确位置。');
     $('codeSections').scrollTop = 0;
+    d.sections.forEach((s, i) => { if (s.frame) revealByte(i + ':6'); });
   }
   function renderChart() {
     if (!currentView || $('workspace').hidden) return;
     const c = currentView.chart, svg = $('chart'), W = Math.max(300, svg.clientWidth), H = svg.clientHeight || 224;
-    const ml = W < 500 ? 48 : 61, mr = 20, mt = 21, mb = 35;
+    const ml = useHex() ? (W < 500 ? 61 : 73) : (W < 500 ? 48 : 61), mr = 20, mt = 21, mb = 35;
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
     if (!c.points.length) { svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#5b6b83" font-size="14">没有有效报文可绘制</text>'; return; }
     let min = Infinity, max = -Infinity;
@@ -229,7 +276,7 @@
     for (let j = 0; j <= 4; j++) {
       const yy = mt + j * (H - mt - mb) / 4, value = Math.round(max - (max - min) * j / 4);
       out += '<line x1="' + ml + '" y1="' + yy + '" x2="' + (W - mr) + '" y2="' + yy + '" stroke="#e5ebf3" stroke-dasharray="3 4"/><text x="' + (ml - 8) +
-        '" y="' + (yy + 4) + '" fill="#5b6b83" text-anchor="end" font-size="12" font-family="Consolas,monospace">' + value + '</text>';
+        '" y="' + (yy + 4) + '" fill="#5b6b83" text-anchor="end" font-size="12" font-family="Consolas,monospace">' + (useHex() ? E.hexWord(value) : value) + '</text>';
       const i = Math.round(c.lo + (c.hi - c.lo) * j / 4);
       out += '<text x="' + x(i) + '" y="' + (H - 12) + '" text-anchor="middle" font-size="12" fill="#5b6b83">' + num(i + 1) + '</text>';
     }
@@ -237,7 +284,8 @@
     c.points.forEach((p, i) => { const prev = c.points[i - 1]; d += (i && prev.segment === p.segment && prev.cycle === p.cycle ? 'L' : 'M') + x(p.index).toFixed(2) + ' ' + y(p.sid).toFixed(2) + ' '; });
     out += '<path d="' + d + '" stroke="#487bd2" stroke-width="1.8" fill="none" stroke-linejoin="round"/>';
     if (c.hi - c.lo < 80) for (const p of c.points) {
-      out += '<circle cx="' + x(p.index) + '" cy="' + y(p.sid) + '" r="3" fill="#fff" stroke="#487bd2"><title>序号 ' + p.sid + ' · L' + p.line + ' · ' + shortTime(p.t) + '</title></circle>';
+      out += '<circle cx="' + x(p.index) + '" cy="' + y(p.sid) + '" r="3" fill="#fff" stroke="#487bd2"><title>序号 ' + E.hexWord(p.sid) +
+        ' / DEC ' + p.sid + ' · 原文字节 ' + E.sequenceBytes(p.sid) + ' · L' + p.line + ' · ' + shortTime(p.t) + '</title></circle>';
     }
     for (const wrap of c.wraps) out += '<line x1="' + x(wrap.index) + '" x2="' + x(wrap.index) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#8295ae" stroke-dasharray="4 4"><title>' + wrap.label + ' · 记录 ' + (wrap.index + 1) + '</title></line>';
     const markerTotals = new Map(), markerSlots = new Map();
@@ -287,6 +335,11 @@
     finally { $('csvBtn').disabled = $('txtBtn').disabled = false; }
   }
   $('newTask').onclick = $('welcomeImport').onclick = openImport;
+  $('sequenceBase').onchange = () => { if (currentView) { renderList(); renderDetail(); renderChart(); } };
+  $('codeSections').addEventListener('click', e => {
+    const button = e.target.closest('[data-locate-byte]');
+    if (button) revealByte(button.dataset.locateByte, true);
+  });
   document.querySelectorAll('[data-input]').forEach(b => { b.onclick = () => setInputMode(b.dataset.input); });
   for (const side of ['raw', 'filtered']) {
     const input = $(side + 'File'), zone = $(side + 'Drop');

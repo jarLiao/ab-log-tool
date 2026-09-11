@@ -1,6 +1,6 @@
 {
   "name": "ab-log-tool",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "在浏览器本地分析 AB 协议日志",
   "scripts": {

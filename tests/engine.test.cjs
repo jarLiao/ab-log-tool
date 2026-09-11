@@ -94,6 +94,12 @@ test('V14 export includes zero gap, true source lines and both sides', () => {
 test('V15 more than two cycles do not create duplicates', () => {
   const ids=Array.from({length:131077},(_,i)=>(65534+i)&65535);
   const s=parse(ids); zeros(s); assert.equal(s.wraps,3); assert.equal(s.rows.at(-1).cycle,3);
+  for (const index of [32768, 65536, 131076]) {
+    const anchors = E.sequenceSource(s, s.rows[index]);
+    assert.equal(anchors[0].line, index + 1);
+    assert.equal(anchors[0].start, 26);
+    assert.equal(s.lines[index].slice(26,30), frame(ids[index]).slice(12,16));
+  }
 });
 test('unresolvable large jump does not create false missing IDs', () => {
   const s=parse([100,60000,60001]); assert.equal(s.counts.uncertain,1); assert.equal(s.counts.gap,0); assert.equal(s.segments,2);
@@ -131,6 +137,60 @@ test('large fragmented frame exports full context while UI folds middle', () => 
   const s=E.parse(text+'\n'+(base+500)+','+frame(102)),d={raw:s},e=s.events[0];
   assert.ok(E.detail(d,e).sections.some(section=>section.lines.some(l=>l.n==null)));
   assert.ok(E.exportParts(d,s.events,'txt').join('').includes('L80  '));
+});
+test('hexadecimal sequence labels and little-endian bytes have explicit leading zeros', () => {
+  assert.equal(E.hexWord(33796),'0x8404'); assert.equal(E.sequenceBytes(33796),'04 84');
+  assert.equal(E.hexWord(0),'0x0000'); assert.equal(E.sequenceBytes(0),'00 00');
+  assert.equal(E.hexWord(65535),'0xFFFF'); assert.equal(E.sequenceBytes(65535),'FF FF');
+});
+test('missing ID has no invented raw frame: anchors point at the two actual neighbors', () => {
+  const s=parse([33796,33798]),d=E.detail({raw:s},s.events[0]);
+  assert.equal(E.hexLabel(d.event),'0x8405');
+  assert.deepEqual(d.sections.map(section=>[section.frame.sidHex,section.frame.seqBytes]),[['0x8406','06 84'],['0x8404','04 84']]);
+  for(const section of d.sections) for(const a of section.frame.anchors) assert.equal(s.lines[a.line-1].slice(a.start,a.end).toUpperCase(),a.value);
+  assert.equal(d.sections[0].frame.anchors[0].start,26);
+});
+test('two sequence bytes can originate in separate fragments and source lines', () => {
+  const a=frame(33796),b=frame(33798);
+  const text=base+','+a.slice(0,14)+'\nerror diagnostic\n'+(base+1)+','+a.slice(14)+b;
+  const s=E.parse(text);
+  const anchors=E.sequenceSource(s,s.rows[0]);
+  assert.deepEqual(anchors.map(a=>[a.line,a.start,a.value]),[[1,26,'04'],[3,14,'84']]);
+  const second=E.sequenceSource(s,s.rows[1]);
+  assert.equal(second[0].start,14+a.length-14+12);
+  assert.equal(s.lines[2].slice(second[0].start,second[0].end),'06');
+});
+test('original whitespace and split hexadecimal nibbles retain exact source columns', () => {
+  const h=frame(33796), text='  '+base+' , \t'+h.split('').join(' \t')+'  ';
+  const s=E.parse(text),anchors=E.sequenceSource(s,s.rows[0]);
+  assert.equal(s.lines[0],text);
+  assert.deepEqual(anchors.map(a=>text.slice(a.start,a.end).replace(/\s/g,'').toUpperCase()),['04','84']);
+});
+test('same bytes elsewhere in a payload are never used as sequence anchors', () => {
+  const a=frame(10,[0x7b,3,0x04,0x84]),b=frame(33796);
+  const text=base+','+a+b,s=E.parse(text),anchors=E.sequenceSource(s,s.rows[1]);
+  assert.equal(anchors[0].start,14+a.length+12);
+  assert.notEqual(anchors[0].start,text.indexOf('0484'));
+  assert.equal(text.slice(anchors[0].start,anchors[1].end),'0484');
+});
+test('a sequence field in the folded middle of a long fragmented frame remains visible', () => {
+  const h=frame(33796,new Array(120).fill(4));
+  const rows=[base+','+h.slice(0,12),...new Array(60).fill('error delay'),base+','+h.slice(12,14),
+    ...new Array(12).fill('error delay'),base+','+h.slice(14,16),...new Array(120).fill('error delay'),
+    base+','+h.slice(16),base+','+frame(33798)];
+  const s=E.parse(rows.join('\n')),d=E.detail({raw:s},s.events[0]),previous=d.sections[1];
+  for(const anchor of previous.frame.anchors) assert.ok(previous.lines.some(l=>l.n===anchor.line));
+});
+test('a CRC-invalid frame has no trusted sequence highlight', () => {
+  const bad=frame(33796).slice(0,-2)+'01',s=E.parse(lines([bad,frame(33798)])),e=s.events.find(e=>e.kind==='parse');
+  const d=E.detail({raw:s},e); assert.equal(d.frame,null); assert.equal(d.sections[0].frame,null);
+});
+test('exports include HEX, decimal and original little-endian byte correspondence', () => {
+  const s=parse([33796,33798]),data={raw:s},csv=E.exportParts(data,s.events,'csv').join(''),txt=E.exportParts(data,s.events,'txt').join('');
+  assert.ok(csv.includes('"消息序号HEX","序号原始字节LE","缺号起始HEX","缺号结束HEX"'));
+  assert.ok(csv.includes('"0x8406","06 84","0x8405","0x8405"'));
+  assert.ok(txt.includes('0x8404 = 33796（十进制）；原始字节：04 84'));
+  assert.ok(txt.includes('0x8405（DEC 33797）'));
 });
 if(process.env.AB_RAW_LOG && process.env.AB_FILTER_LOG) {
   test('supplied logs reproduce verified baseline', () => {

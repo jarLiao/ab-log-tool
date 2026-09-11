@@ -34,15 +34,29 @@ async function importTask(page,mode,raw,filtered){
     await page.locator('#demoBtn').click();
     await expectCount(page,'gap',2);
     ok('Demo is parsed by the real worker',await readCount(page,'reorder')===2&&await readCount(page,'duplicate')===1&&await readCount(page,'collision')===1);
+    ok('Sequence list defaults to HEX with decimal underneath',(await page.locator('#eventRows tr').first().innerText()).includes('0x0065')&&(await page.locator('#eventRows tr').first().innerText()).includes('DEC 101'));
+    await page.locator('#sequenceBase').selectOption('dec');
+    ok('Changing display base updates axis and list without changing analysis',!(await page.locator('#chart text').allTextContents()).some(v=>v.includes('0x'))&&await readCount(page,'gap')===2);
+    await page.locator('#sequenceBase').selectOption('hex');
+    ok('HEX axis is explicitly labeled',(await page.locator('#chart text').allTextContents()).some(v=>v.startsWith('0x')));
     await page.screenshot({path:path.join(out,'demo-desktop.png'),fullPage:true});
     if(process.env.AB_RAW_LOG&&process.env.AB_FILTER_LOG){
       await importTask(page,'pair',process.env.AB_RAW_LOG,process.env.AB_FILTER_LOG);
       await expectCount(page,'frames',399);
       ok('Real raw input: 399 valid frames and 142 final missing IDs',await readCount(page,'gap')===142);
+      await page.waitForFunction(()=>document.querySelectorAll('.seq-byte-mark').length===4);
+      ok('Missing sequence is separate from the real source anchors',(await page.locator('#detailTitle').innerText()).includes('0x8407')&&(await page.locator('.sequence-map').first().innerText()).includes('0x8408'));
+      ok('Raw source sequence highlights target only offset 6 and 7',JSON.stringify(await page.locator('.seq-byte-mark').allTextContents())===JSON.stringify(['08','84','06','84']));
+      ok('Highlighting preserves the original timestamp and complete raw text',(await page.locator('.raw-section').first().locator('.code-line.highlight code').innerText())===fs.readFileSync(process.env.AB_RAW_LOG,'utf8').split(/\r?\n/)[7]);
+      ok('Visible sequence anchors retain the unscrolled AB frame prefix',await page.locator('.raw-section .code').first().evaluate(el=>el.scrollLeft===0));
       await page.screenshot({path:path.join(out,'sample-raw.png'),fullPage:true});
       await page.locator('#search').fill('33945');
       await page.waitForFunction(()=>document.querySelector('#detailTitle').textContent.includes('同号不同内容'));
       ok('Same-ID differing-content links both L302 and L304',(await page.locator('#codeSections').innerText()).includes('L302')&&(await page.locator('#codeSections').innerText()).includes('L304'));
+      ok('Collision shows the 0x8499 / 33945 / 99 84 correspondence',(await page.locator('.sequence-map').first().innerText()).includes('99 84')&&(await page.locator('#detailTitle').innerText()).includes('0x8499'));
+      await page.locator('[data-locate-byte="1:7"]').click();
+      ok('Clicking a header byte focuses its exact position in original text',await page.evaluate(()=>document.activeElement?.dataset.sourceByte==='1:7'));
+      await page.locator('.inspector').screenshot({path:path.join(out,'sequence-anchor-detail.png')});
       await page.locator('#search').fill('');
       await page.locator('#kindFilter').selectOption('duplicate');
       await page.locator('#empty').waitFor({state:'visible'});
@@ -65,6 +79,7 @@ async function importTask(page,mode,raw,filtered){
       const csvPath=path.join(out,'filtered.csv');await d1.saveAs(csvPath);
       const csv=fs.readFileSync(csvPath);
       ok('Filtered CSV download has BOM, Chinese header and one event',csv.subarray(0,3).equals(Buffer.from([239,187,191]))&&csv.toString().split('\r\n').filter(Boolean).length===2);
+      ok('CSV exports the added HEX and original byte columns',csv.toString().includes('消息序号HEX')&&csv.toString().includes('序号原始字节LE'));
       await page.locator('#exportRange').selectOption('all');
       const download2=page.waitForEvent('download');await page.locator('#csvBtn').click();const d2=await download2;await d2.saveAs(path.join(out,'all.csv'));
       ok('Default all-results export includes both independent analyses and pair differences',fs.readFileSync(path.join(out,'all.csv'),'utf8').split('\r\n').filter(Boolean).length===251);
@@ -89,6 +104,13 @@ async function importTask(page,mode,raw,filtered){
       ok('Chart anomaly markers support keyboard activation');
     }
     await context.setOffline(true);
+    const fa=E.makeFrame(33796),fb=E.makeFrame(33798);
+    const fragmented=1800000000000+','+fa.slice(0,14)+'\nerror fragment\n'+1800000000001+','+fa.slice(14)+fb;
+    await importTask(page,'raw',{name:'fragment-anchors.txt',mimeType:'text/plain',buffer:Buffer.from(fragmented)});
+    await expectCount(page,'frames',2);
+    ok('Split fields and multiple frames per line keep accurate original highlights',JSON.stringify(await page.locator('.seq-byte-mark').allTextContents())===JSON.stringify(['06','84','04','84']));
+    await page.locator('[data-locate-byte="1:7"]').click();
+    ok('Cross-line high byte locator remains usable',await page.evaluate(()=>document.activeElement?.closest('.code-line').querySelector('.ln').textContent==='3'));
     const sequence=[65534,0,65535,1,1,3];
     const body=sequence.map((sid,i)=>(1800000000000+i)+','+E.makeFrame(sid)).join('\n');
     await importTask(page,'filtered',null,{name:'wrap-utf16.txt',mimeType:'text/plain',buffer:Buffer.concat([Buffer.from([255,254]),Buffer.from(body,'utf16le')])});
