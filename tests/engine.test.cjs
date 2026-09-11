@@ -19,6 +19,61 @@ const zeros = s => {
   for (const k of ['gap', 'reorder', 'duplicate', 'collision', 'parse', 'uncertain', 'rollback']) assert.equal(s.counts[k], 0, k);
 };
 test('CRC16 XMODEM known check value', () => assert.equal(E.crc16(Buffer.from('123456789')), 0x31c3));
+
+test('packet interval follows valid reception order across commands and sequence disorder', () => {
+  const s=E.parse([base+','+frame(100),(base+20)+','+frame(102,[1,3,0x15,0]),'diagnostic',(base+75)+','+frame(101)].join('\n'));
+  assert.equal(E.packetTiming(s,s.rows[0]).ms,null);
+  const timing=E.packetTiming(s,s.rows[2]);
+  assert.equal(timing.ms,55); assert.equal(timing.previous.sid,102); assert.equal(timing.previous.line,2);
+  assert.equal(E.detail({raw:s},s.events[0]).frame.timing.ms,55);
+  assert.equal(E.chart({raw:s},'raw',{command:'123'}).points.at(-1).timing.ms,55);
+});
+
+test('fragment timestamps use first fragment and same-line frames have zero interval', () => {
+  const first=frame(100),second=frame(101),third=frame(102);
+  const s=E.parse(base+','+first.slice(0,14)+'\n'+(base+50)+','+first.slice(14)+second+third);
+  assert.deepEqual(s.rows.map(row=>E.packetTiming(s,row).ms),[null,50,0]);
+  assert.ok(E.packetTiming(s,s.rows[2]).hint.includes('相同'));
+});
+
+test('timestamp rollback and segment boundaries retain actual signed receive-time difference', () => {
+  const s=E.parse([base+','+frame(0),(base-8)+','+frame(32768),(base+1200)+','+frame(32769)].join('\n'));
+  assert.equal(s.segments,2);
+  const t=E.packetTiming(s,s.rows[1]);
+  assert.equal(t.ms,-8); assert.equal(t.acrossSegment,true); assert.ok(t.hint.includes('时间戳回退'));
+  assert.equal(E.packetTiming(s,s.rows[2]).label,'1208 ms（1.208 s）');
+});
+
+test('gap intervals use the actual preceding received packet, not the sequence-range anchor', () => {
+  const s=E.parse([100,104,102,105].map((id,i)=>(base+i*10)+','+frame(id)).join('\n'));
+  const gap=s.events.find(e=>e.kind==='gap'&&e.from===101),d=E.detail({raw:s},gap);
+  assert.equal(d.sections[1].frame.sid,100);
+  assert.equal(d.frame.timing.previous.sid,104); assert.equal(d.frame.timing.ms,10);
+});
+
+test('corrupt and diagnostic rows have no packet interval, while valid packets skip corrupt rows', () => {
+  const bad=frame(101).slice(0,-2)+'ff';
+  const s=E.parse(base+','+frame(100)+'\n'+(base+10)+','+bad+'\n'+(base+40)+','+frame(102));
+  assert.equal(E.detail({raw:s},s.events.find(e=>e.kind==='parse')).frame,null);
+  assert.equal(E.packetTiming(s,s.rows[1]).ms,40);
+  s.rows[1].t=Number.MAX_SAFE_INTEGER+1;
+  assert.equal(E.packetTiming(s,s.rows[1]).ms,null);
+});
+
+test('interval exports preserve zero and negative numbers and describe each source independently', () => {
+  const s=E.parse([base+','+frame(100),base+','+frame(100),(base-10)+','+frame(100)].join('\n'));
+  const csv=E.exportParts({raw:s},s.events,'csv').join('');
+  const rows=csv.trim().replace(/^\uFEFF/,'').split('\r\n').map(line=>line.slice(1,-1).split('\",\"'));
+  const header=rows.shift(),field=(r,key)=>r[header.indexOf(key)];
+  assert.equal(field(rows[0],'距上包间隔ms'),'0'); assert.equal(field(rows[1],'距上包间隔ms'),'-10');
+  assert.equal(field(rows[1],'上包起始行'),'2');
+  const txt=E.exportParts({raw:s},s.events,'txt').join('');
+  assert.ok(txt.includes('与上包间隔：-10 ms')); assert.ok(txt.includes('时间戳回退'));
+  const filtered=E.parse((base+100)+','+frame(100),'filtered.txt','filtered'),pair=E.compare(s,filtered);
+  const data={raw:s,filtered,pair};
+  const only=pair.events.find(e=>e.source==='filtered');
+  assert.equal(E.detail(data,only).frame.timing.previous,null);
+});
 test('V01 continuous sequence', () => { const s = parse([100,101,102]); zeros(s); assert.equal(s.counts.frames, 3); });
 test('V02 final missing range', () => { const s = parse([100,102,103]); assert.equal(s.counts.gap, 1); assert.equal(kinds(s,'gap')[0].from,101); });
 test('V03 late arrival removes a candidate gap', () => { const s = parse([100,102,101,103]); assert.equal(s.counts.gap,0); assert.equal(s.counts.reorder,1); });

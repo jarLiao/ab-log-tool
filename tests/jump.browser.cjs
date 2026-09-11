@@ -29,7 +29,7 @@ async function load(page,mode='raw'){
   page.on('request',r=>report.requests.push({url:r.url(),method:r.method()}));
   try{
     await page.goto(url);await load(page);
-    ok('Version identifies the correction',(await page.locator('.version').innerText()).includes('v1.3.1'));
+    ok('Version matches the released package',(await page.locator('.version').innerText()).includes('v'+require('../package.json').version));
     ok('Synthetic pattern keeps 26827 frames and two boundaries',await count(page,'frames')===26827&&await count(page,'rollback')===2);
     ok('Segment missing IDs, late arrivals and collisions remain zero',await count(page,'gap')===0&&await count(page,'reorder')===0&&await count(page,'collision')===0);
     ok('Boundary count is explicitly different from a loss count',(await page.locator('[data-count="rollback"]').innerText()).includes('处边界，非丢包数量')&&(await page.locator('#qualityNote').innerText()).includes('3 个分析段'));

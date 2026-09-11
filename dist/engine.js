@@ -387,10 +387,24 @@
           value: row.hex.slice(frameOffset * 2, frameOffset * 2 + 2).toUpperCase()};
       });
     }
+    function packetTiming(s, row) {
+      if (!row) return null;
+      const previous = s.rows[row.index - 1];
+      if (!previous) return {ms: null, previous: null, label: '—（首包）', hint: '本日志的第一条有效报文，没有上包。'};
+      const ms = Number.isSafeInteger(row.t) && Number.isSafeInteger(previous.t) ? row.t - previous.t : null;
+      const acrossSegment = previous.segment !== row.segment;
+      return {ms, previous: {index: previous.index, line: previous.line, endLine: previous.endLine, sid: previous.sid, t: previous.t}, acrossSegment,
+        label: ms == null ? '—（时间戳不可用）' : ms + ' ms' + (Math.abs(ms) >= 1000 ? '（' + (ms / 1000).toFixed(3) + ' s）' : ''),
+        hint: (ms == null ? '无法可靠计算时间差。' : ms < 0 ? '时间戳回退，保留原始负值。' : ms === 0 ? '两包使用相同的接收时间戳。' : '当前接收时间减去上一有效报文的接收时间。') +
+          (acrossSegment ? '跨分析段，仅表示日志接收时间差。' : '')};
+    }
+    function timingText(timing) {
+      return timing ? '与上包间隔：' + timing.label + (timing.previous ? '；上包 ' + hexWord(timing.previous.sid) + ' / L' + timing.previous.line : '') + '。' + timing.hint : '';
+    }
     function frameInfo(s, row) {
       if (!row) return null;
       return {index: row.index, line: row.line, endLine: row.endLine, total: s.rows.length, sid: row.sid, sidHex: hexWord(row.sid), seqBytes: sequenceBytes(row.sid),
-        cmd: hexByte(row.cmd), key: hexByte(row.key), cycle: row.cycle, segment: row.segment,
+        cmd: hexByte(row.cmd), key: hexByte(row.key), cycle: row.cycle, segment: row.segment, timing: packetTiming(s, row),
         length: row.bodyLength + 8, t: timestamp(row.t), hex: row.hex.slice(0, 512), truncated: row.hex.length > 512,
         header: row.hex.slice(0, 16).toUpperCase().match(/../g), anchors: sequenceSource(s, row)};
     }
@@ -475,7 +489,7 @@
         }
         for (const j of [...new Set([a, mn, mx, b])].sort((x, y) => x - y)) {
           const r = rows[j];
-          points.push({index: j, sid: r.sid, line: r.line, t: r.t, cmd: r.cmd, key: r.key, segment: r.segment, cycle: r.cycle});
+          points.push({index: j, sid: r.sid, line: r.line, t: r.t, cmd: r.cmd, key: r.key, segment: r.segment, cycle: r.cycle, timing: packetTiming(s, r)});
         }
       }
       const grouped = new Map();
@@ -505,16 +519,18 @@
         const out = ['\uFEFF' + ['异常编号', '记录类型', '来源文件', '起始行', '结束行', '关联文件', '关联起始行', '关联结束行',
           '接收时间', '毫秒时间戳', '消息序号', '命令', 'Key', '可分析段', '序号周期', '缺号起始', '缺号结束', '缺号数量', '覆盖范围', '说明', '导出范围',
           '消息序号HEX', '序号原始字节LE', '缺号起始HEX', '缺号结束HEX', '前一报文序号', '前一报文序号HEX', '序号数值变化', '统计口径',
-          '判定提示', '候选向前跨度', '候选向后跨度'].map(cell).join(',') + '\r\n'];
+          '判定提示', '候选向前跨度', '候选向后跨度', '距上包间隔ms', '上包序号HEX', '上包起始行', '上包接收时间', '间隔说明'].map(cell).join(',') + '\r\n'];
         let chunk = '';
         for (const e of events) {
+          const timing = packetTiming(data[e.source], ['parse', 'logLine'].includes(e.kind) ? null : data[e.source].rows[e.index]);
           chunk += [e.id, title(e), data[e.source].name, e.line, e.endLine, e.relatedSource ? data[e.relatedSource].name : '',
             e.relatedLine, e.relatedEndLine, timestamp(e.t), e.t, e.sid, hexByte(e.cmd), hexByte(e.key), e.segment, e.cycle,
             e.from, e.to, e.count, e.coverage === 'inside' ? '共有范围内' : e.coverage === 'outside' ? '共有范围外' : e.coverage === 'unknown' ? '无共有范围' : '',
             descriptions(e, data), scope, hexWord(e.sid), sequenceBytes(e.sid), hexWord(e.from), hexWord(e.to),
             e.previousSid, hexWord(e.previousSid), e.numericDelta,
             data[e.source].segments > 1 ? '按段统计；段间待核对' : '单段统计', e.directionHint,
-            e.forwardDistance, e.backwardDistance].map(cell).join(',') + '\r\n';
+            e.forwardDistance, e.backwardDistance, timing?.ms, hexWord(timing?.previous?.sid), timing?.previous?.line,
+            timestamp(timing?.previous?.t), timing?.hint].map(cell).join(',') + '\r\n';
           if (chunk.length > 262144) { out.push(chunk); chunk = ''; }
         }
         if (chunk) out.push(chunk);
@@ -536,7 +552,8 @@
           if (index != null) {
             const row = s.rows[index];
             chunk += '报文序号：' + hexWord(row.sid) + ' = ' + row.sid + '（十进制）；原始字节：' + sequenceBytes(row.sid) +
-              '（小端，AB 帧内偏移 6、7）\r\n命令 / Key：' + (hexByte(row.cmd) || '—') + ' / ' + (hexByte(row.key) || '—') + '\r\n';
+              '（小端，AB 帧内偏移 6、7）\r\n命令 / Key：' + (hexByte(row.cmd) || '—') + ' / ' + (hexByte(row.key) || '—') + '\r\n' +
+              timingText(packetTiming(s, row)) + '\r\n';
           }
           for (let n = Math.max(1, start - 5); n <= Math.min(s.lines.length, end + 5); n++) {
             chunk += 'L' + n + '  ' + s.lines[n - 1] + '\r\n';
@@ -549,7 +566,7 @@
       return out;
     }
     return {parse, compare, summary, crc16, makeFrame, names, title, label, timestamp,
-      selectEvents, detail, inspect, framesAtLine, logWindow, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource};
+      selectEvents, detail, inspect, framesAtLine, logWindow, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource, packetTiming, timingText};
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = createEngine();
   else { root.ABEngineFactory = createEngine; root.ABEngine = createEngine(); }

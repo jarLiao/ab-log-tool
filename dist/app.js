@@ -1,7 +1,7 @@
-/* UI state contains summaries and one result page. Log bytes stay in the worker. */
+/* The worker owns parsed logs; original Files can be archived locally. */
 (function () {
   'use strict';
-  const E = window.ABEngine, $ = id => document.getElementById(id);
+  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.4.0', $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const num = value => Number(value || 0).toLocaleString('zh-CN');
   const bytes = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(1) + ' KB';
@@ -17,6 +17,8 @@
   let mode = 'raw', inputMode = 'raw', selected = '', currentView = null, activeChart = {}, focused = true;
   let files = {raw: null, filtered: null}, contextText = '', toastTimer, filterTimer, demo = false, started = 0;
   let inspection = null, logStates = [], detailKey = '', chartPoints = [];
+  let archive = null, historyEntries = [], historyDelete = null, historyTicket = 0, taskTicket = 0;
+  let historyWrite = Promise.resolve();
   const LOG_ROW_HEIGHT = 28;
   function toast(text, delay = 4200) {
     $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer);
@@ -58,6 +60,7 @@
     });
   }
   function resetWorkspace() {
+    archive = null; $('historySaveStatus').textContent = ''; $('saveHistoryBtn').hidden = true;
     inspection = null; detailKey = ''; logStates = []; chartPoints = [];
     meta = null; selected = ''; currentView = null; contextText = ''; renderId++;
     $('workspace').hidden = true; $('welcome').hidden = false; $('exportBtn').disabled = true;
@@ -79,7 +82,8 @@
     $('importError').hidden = true;
   }
   function openImport() { $('importError').hidden = true; $('importDialog').showModal(); }
-  async function analyze(selectedFiles, isDemo = false) {
+  async function analyze(selectedFiles, isDemo = false, restored = null) {
+    const ticket = ++taskTicket, remember = !isDemo && $('rememberLogs').checked;
     demo = isDemo; started = performance.now();
     try {
       for (const file of Object.values(selectedFiles)) {
@@ -90,7 +94,8 @@
       resetWorkspace(); startWorker();
       $('progressTitle').textContent = '正在分析日志'; $('progressText').textContent = '读取文件…';
       $('progress').value = 0; $('progressPercent').textContent = '0%'; $('progressDialog').showModal();
-      const response = await rpc('load', {files: selectedFiles});
+      const response = await rpc('load', {files: selectedFiles, fingerprint: !isDemo && !restored});
+      if (ticket !== taskTicket) return;
       meta = response.meta;
       $('progressDialog').close();
       $('welcome').hidden = true; $('workspace').hidden = false; $('exportBtn').disabled = false;
@@ -101,6 +106,23 @@
       $('sourceNote').innerHTML = Object.entries(meta).filter(([key]) => key !== 'pair').map(([key, s]) =>
         '<strong>' + (key === 'raw' ? '原始接收' : '过滤之后') + '</strong>' + esc(s.name) + '<br>' + bytes(s.bytes) + ' · ' + esc(s.encoding) + '<br><br>').join('');
       await changeMode(meta.raw ? 'raw' : 'filtered');
+      if (ticket !== taskTicket) return;
+      if (isDemo) { $('historySaveStatus').textContent = '演示数据不保存到本机历史。'; return; }
+      const sources = Object.entries(selectedFiles).map(([side, file]) => ({side, name: file.name, size: file.size}));
+      const id = restored?.id || (sources.every(s => response.fingerprints[s.side]) ? JSON.stringify(sources.map(s => [s.side, s.name, response.fingerprints[s.side]])) :
+        'task-' + (crypto.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2)));
+      const summary = Object.fromEntries(Object.entries(meta).filter(([side]) => side !== 'pair').map(([side, s]) => [side, {counts: s.counts, segments: s.segments}]));
+      const entry = {id, sources, summary, bytes: sources.reduce((n, s) => n + s.size, 0), version: VERSION, updatedAt: Date.now()};
+      archive = {entry, files: {...selectedFiles}, saved: !!restored};
+      if (restored) {
+        setArchiveStatus('已从本机历史打开，按当前规则重新分析。', false);
+        const current = archive;
+        historyWrite = historyWrite.catch(() => {}).then(() => H.touch(id, {summary, version: VERSION})).then(found => {
+          if (!found && current === archive) { current.saved = false; setArchiveStatus('这条历史已被其他页面删除，当前分析仍可继续。', true); }
+          return refreshHistory();
+        }).catch(error => { if (current === archive) setArchiveStatus('已打开日志；历史状态更新失败：' + H.errorMessage(error), true); });
+      } else if (remember) saveArchive();
+      else setArchiveStatus('本次仅查看，尚未保存到本机历史。', true);
     } catch (e) {
       if (e.message === '已取消') return;
       if ($('progressDialog').open) $('progressDialog').close();
@@ -108,6 +130,85 @@
       $('importError').textContent = '无法完成分析：' + e.message; $('importError').hidden = false;
       if (!$('importDialog').open) $('importDialog').showModal();
     }
+  }
+  function setArchiveStatus(text, canSave) {
+    $('historySaveStatus').textContent = text;
+    $('saveHistoryBtn').hidden = !canSave; $('saveHistoryBtn').disabled = false;
+  }
+  function saveArchive() {
+    const current = archive;
+    if (!current || current.saving) return;
+    current.saving = true;
+    setArchiveStatus('正在保存完整日志到本机…', false);
+    historyWrite = historyWrite.catch(() => {}).then(() => H.save({...current.entry, updatedAt: Date.now()}, current.files)).then(entry => {
+      current.entry = entry; current.saved = true;
+      if (current === archive) setArchiveStatus('已保存到本机历史，可在下次打开网页时继续查看。', false);
+      return refreshHistory();
+    }).catch(error => {
+      if (current === archive) setArchiveStatus('本次未保存：' + H.errorMessage(error) + ' 当前分析与导出仍可使用。', true);
+    }).finally(() => { current.saving = false; });
+  }
+  function historyMessage(text, error = false) {
+    $('historyMessage').textContent = text; $('historyMessage').hidden = !text;
+    $('historyMessage').classList.toggle('error-text', error);
+  }
+  function renderHistory() {
+    const query = $('historySearch').value.trim().toLowerCase();
+    const entries = historyEntries.filter(entry => entry.sources.some(s => s.name.toLowerCase().includes(query)));
+    $('historyList').innerHTML = entries.map(entry => '<article class="history-item"><div class="history-info"><strong>' +
+      entry.sources.map(s => esc(s.name)).join('<br>') + '</strong><p>' + (entry.sources.length === 2 ? '配对任务' : entry.sources[0].side === 'raw' ? '原始接收' : '过滤之后') +
+      ' · ' + bytes(entry.bytes) + ' · 最近打开 ' + esc(E.timestamp(entry.updatedAt).slice(0, 19)) + '</p><p>' +
+      entry.sources.map(s => { const summary = entry.summary[s.side]; return (s.side === 'raw' ? '原始 ' : '过滤 ') + num(summary.counts.frames) +
+        ' 帧 · ' + (summary.segments > 1 ? '段内' : '') + '缺号 ' + num(summary.counts.gap); }).join('；') +
+      '</p></div><div class="history-item-actions"><button class="button primary" data-history-open="' + esc(entry.id) + '">打开</button>' +
+      '<button class="button" data-history-delete="' + esc(entry.id) + '" aria-label="删除历史 ' + esc(entry.sources.map(s => s.name).join(' / ')) + '">删除</button></div></article>').join('');
+    $('historyEmpty').hidden = entries.length > 0;
+    $('historyEmpty').textContent = historyEntries.length ? '没有匹配的文件名。' : '还没有本机历史。导入日志并完成分析后会自动保存。';
+    $('clearHistoryBtn').disabled = !historyEntries.length;
+  }
+  async function refreshHistory() {
+    const ticket = ++historyTicket;
+    try {
+      const entries = await H.list();
+      if (ticket !== historyTicket) return;
+      historyEntries = entries; $('historyCount').textContent = num(entries.length);
+      $('historyStorage').textContent = entries.length + ' / 20 条 · 日志总大小 ' + bytes(entries.reduce((n, e) => n + e.bytes, 0)) + ' / 512 MB。到达上限时保留旧记录，提示手动清理。';
+      renderHistory();
+    } catch (error) {
+      if (ticket !== historyTicket) return;
+      $('historyCount').textContent = '—'; $('historyEmpty').hidden = true;
+      historyMessage('无法读取本机历史：' + H.errorMessage(error) + ' 日志分析仍可使用。', true);
+    }
+  }
+  async function openHistory(id) {
+    const buttons = $('historyList').querySelectorAll('button'); buttons.forEach(b => { b.disabled = true; });
+    historyMessage('正在读取保存的日志…');
+    try {
+      const saved = await H.get(id), task = {};
+      for (const source of saved.entry.sources) {
+        const blob = saved.files[source.side];
+        if (!(blob instanceof Blob) || blob.size !== source.size) throw new Error('历史日志数据不完整，请重新导入文件。');
+        task[source.side] = blob instanceof File ? blob : new File([blob], source.name);
+      }
+      $('historyDialog').close(); historyMessage('');
+      await analyze(task, false, saved.entry);
+    } catch (error) { historyMessage(H.errorMessage(error), true); }
+    finally { buttons.forEach(b => { b.disabled = false; }); }
+  }
+  async function deleteHistory() {
+    if (!historyDelete) return;
+    const target = historyDelete; $('confirmHistoryDelete').disabled = true;
+    try {
+      await historyWrite;
+      if (target === '*') await H.clear(); else await H.remove(target);
+      if (archive && (target === '*' || archive.entry.id === target)) {
+        archive.saved = false; setArchiveStatus('本机历史已删除；当前页面中的分析可继续使用。', true);
+      }
+      historyDelete = null; $('historyDeleteConfirm').hidden = true;
+      await refreshHistory(); historyMessage(target === '*' ? '已清空本工具的本机历史。' : '已删除这条历史及保存的日志。');
+      $('historySearch').focus();
+    } catch (error) { historyMessage('删除失败：' + H.errorMessage(error), true); }
+    finally { $('confirmHistoryDelete').disabled = false; }
   }
   function currentFilter() {
     const t = id => $(id).value ? new Date($(id).value + '+08:00').getTime() : '';
@@ -237,7 +338,7 @@
         '，原文 L' + a.line + ' 第 ' + (a.start + 1) + ' 列">' + a.value + '</button>').join('') +
       '</span></span><span class="header-slot command-slot"><small>命令</small><strong class="mono">' + (frame.cmd || '—') +
       '</strong></span><span class="header-slot key-slot"><small>Key</small><strong class="mono">' + (frame.key || '—') +
-      '</strong></span></div><div class="byte-caption">AB 第 7、8 字节 · 偏移 6、7 · 小端：低字节在前</div></div>';
+      '</strong></span></div><div class="byte-caption">AB 第 7、8 字节 · 偏移 6、7 · 小端：低字节在前</div><div class="packet-timing">' + esc(E.timingText(frame.timing)) + '</div></div>';
   }
   async function revealByte(target, scrollSection = false) {
     const [section, offset] = target.split(':').map(Number), state = logStates[section];
@@ -334,10 +435,12 @@
       ['接收时间', E.timestamp(e.t) || '—'], ['命令 / Key', d.frame ? (d.frame.cmd || '—') + ' / ' + (d.frame.key || '—') : '— / —'],
       ['可分析段 / 序号周期', d.frame ? d.frame.segment + ' / ' + d.frame.cycle : '—']];
     if (e.previousSid != null) fields.push(['观测到的数值变化', e.numericChange], ['判定状态', e.directionHint]);
+    if (d.frame) fields.push(['与上包间隔', d.frame.timing.label], ['上一有效报文', d.frame.timing.previous ? E.hexWord(d.frame.timing.previous.sid) + ' / L' + d.frame.timing.previous.line : '—（首包）']);
     $('fields').innerHTML = fields.map(([a, b]) => '<div class="field"><span>' + a + '</span><strong class="mono">' + esc(b) + '</strong></div>').join('');
     contextText = '[' + e.id + '] ' + E.title(e) + ' ' + E.dualLabel(e) + '\n' + d.description + '\n\n' +
       d.sections.map(s => s.name + '\n' + (s.frame ? '原文字节 ' + s.frame.seqBytes + ' → ' + s.frame.sidHex + ' = DEC ' + s.frame.sid + '（小端）\n' : '') +
         (s.frame ? '命令 / Key：' + (s.frame.cmd || '—') + ' / ' + (s.frame.key || '—') + '\n' : '') +
+        (s.frame ? E.timingText(s.frame.timing) + '\n' : '') +
         s.lines.map(l => (l.n == null ? '' : 'L' + l.n + '  ') + l.text).join('\n')).join('\n\n');
     $('contextNote').textContent = '可滚动浏览完整文件，点击行同步更新解析；↑ / ↓ 选择相邻行，Home / End 到文件首尾。' +
       (e.kind === 'gap' ? '缺号没有原始报文；黄色字节属于前后实际存在的报文。' : '点击序号低 / 高字节可跳到字段原文。');
@@ -394,7 +497,7 @@
     if (c.hi - c.lo < 80) for (const p of c.points) {
       const isSelected = inspection?.source === c.side && inspection.index === p.index;
       const title = '报文 ' + (p.index + 1) + ' · 序号 ' + E.hexWord(p.sid) + ' / DEC ' + p.sid + ' · 命令 / Key ' +
-        (E.hexByte(p.cmd) || '—') + ' / ' + (E.hexByte(p.key) || '—') + ' · L' + p.line + ' · ' + shortTime(p.t);
+        (E.hexByte(p.cmd) || '—') + ' / ' + (E.hexByte(p.key) || '—') + ' · L' + p.line + ' · ' + shortTime(p.t) + ' · ' + E.timingText(p.timing);
       out += '<g class="chart-record" data-record-index="' + p.index + '" role="button" tabindex="-1" aria-label="' + esc(title) + '"><title>' + esc(title) +
         '</title><rect x="' + (x(p.index) - 12) + '" y="' + (y(p.sid) - 12) + '" width="24" height="24" fill="transparent"/>' +
         '<circle cx="' + x(p.index) + '" cy="' + y(p.sid) + '" r="' + (isSelected ? 5 : 3) + '" fill="' + (isSelected ? '#285cce' : '#fff') + '" stroke="#487bd2"/></g>';
@@ -507,7 +610,7 @@
     }
     analyze(task);
   };
-  $('cancelAnalysis').onclick = () => { endWorker(); $('progressDialog').close(); resetWorkspace(); toast('分析已取消，未生成最终结果。'); };
+  $('cancelAnalysis').onclick = () => { taskTicket++; endWorker(); $('progressDialog').close(); resetWorkspace(); toast('分析已取消，未生成最终结果。'); };
   $('progressDialog').addEventListener('cancel', e => { e.preventDefault(); $('cancelAnalysis').click(); });
   $('demoBtn').onclick = () => {
     const t = 1800000000000, records = [];
@@ -573,6 +676,32 @@
     focused = false; activeChart = {side: c.side, lo, hi: lo + span}; requestView();
   };
   $('aboutBtn').onclick = () => $('aboutDialog').showModal();
+  $('historyBtn').onclick = async () => {
+    historyMessage(''); historyDelete = null; $('historyDeleteConfirm').hidden = true;
+    $('historyDialog').showModal(); $('historySearch').focus();
+    await historyWrite; await refreshHistory();
+  };
+  $('saveHistoryBtn').onclick = saveArchive;
+  $('refreshHistoryBtn').onclick = () => { historyMessage(''); refreshHistory(); };
+  $('historySearch').oninput = renderHistory;
+  $('historyList').onclick = event => {
+    const open = event.target.closest('[data-history-open]'), remove = event.target.closest('[data-history-delete]');
+    if (open) openHistory(open.dataset.historyOpen);
+    if (remove) {
+      historyDelete = remove.dataset.historyDelete;
+      const entry = historyEntries.find(e => e.id === historyDelete);
+      $('historyDeleteText').textContent = '删除 ' + entry.sources.map(s => s.name).join(' / ') + ' 的本机历史和保存的日志？原始文件不受影响。';
+      $('historyDeleteConfirm').hidden = false; $('cancelHistoryDelete').focus();
+    }
+  };
+  $('clearHistoryBtn').onclick = () => {
+    historyDelete = '*'; $('historyDeleteText').textContent = '清空本工具的全部 ' + historyEntries.length + ' 条本机历史和保存的日志？原始文件不受影响。';
+    $('historyDeleteConfirm').hidden = false; $('cancelHistoryDelete').focus();
+  };
+  $('cancelHistoryDelete').onclick = () => { historyDelete = null; $('historyDeleteConfirm').hidden = true; $('historySearch').focus(); };
+  $('confirmHistoryDelete').onclick = deleteHistory;
+  try { $('rememberLogs').checked = localStorage.getItem('ab-log-remember') !== 'false'; } catch { /* Session preference still works. */ }
+  $('rememberLogs').onchange = () => { try { localStorage.setItem('ab-log-remember', String($('rememberLogs').checked)); } catch {} };
   $('exportBtn').onclick = () => { $('exportScope').textContent = (demo ? '当前为人工生成的演示日志。' : '') + '当前视图筛选出 ' + num(currentView.total) + ' 条记录。'; $('exportDialog').showModal(); };
   document.querySelectorAll('[data-close]').forEach(b => { b.onclick = () => b.closest('dialog').close(); });
   $('csvBtn').onclick = () => exportFile('csv'); $('txtBtn').onclick = () => exportFile('txt');
@@ -585,4 +714,5 @@
   };
   new ResizeObserver(() => renderChart()).observe($('chart'));
   setInputMode('raw');
+  refreshHistory();
 })();

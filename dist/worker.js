@@ -21,8 +21,13 @@ function abWorkerMain() {
       id[0] === 'M' ? data.pair?.matches : data.pair?.events;
     return arr?.[index] || null;
   }
-  async function read(file) {
+  async function read(file, fingerprint) {
     const buffer = await file.arrayBuffer(), bytes = new Uint8Array(buffer);
+    let hash = '';
+    if (fingerprint && self.crypto?.subtle) {
+      try { hash = Array.from(new Uint8Array(await self.crypto.subtle.digest('SHA-256', buffer)), n => n.toString(16).padStart(2, '0')).join(''); }
+      catch { /* Lack of fingerprinting must not prevent log analysis. */ }
+    }
     let encoding = 'UTF-8', text;
     if (bytes[0] === 0xff && bytes[1] === 0xfe) encoding = 'UTF-16LE';
     else if (bytes[0] === 0xfe && bytes[1] === 0xff) encoding = 'UTF-16BE';
@@ -31,18 +36,19 @@ function abWorkerMain() {
       encoding = 'GB18030';
       text = new TextDecoder('gb18030', {fatal: true}).decode(buffer);
     }
-    return {text, encoding};
+    return {text, encoding, hash};
   }
   self.onmessage = async ({data: msg}) => {
     const {id, type} = msg;
     try {
       if (type === 'load') {
         data = {}; cachedEvents = []; cachedKey = '';
-        const sides = Object.keys(msg.files);
+        const sides = Object.keys(msg.files), fingerprints = {};
         for (let i = 0; i < sides.length; i++) {
           const side = sides[i], file = msg.files[side];
           sendProgress(2 + i * 35, '读取 ' + file.name);
-          const input = await read(file);
+          const input = await read(file, msg.fingerprint);
+          fingerprints[side] = input.hash;
           const start = performance.now();
           const s = E.parse(input.text, file.name, side, (p, stage) =>
             sendProgress(5 + i * 35 + (stage === '分析序号' ? 23 + p * 9 : p * 23), file.name + ' · ' + stage));
@@ -59,7 +65,7 @@ function abWorkerMain() {
           meta[side].commands = [...new Set(data[side].rows.map(r => r.cmd).filter(n => n != null))].sort((a, b) => a - b);
         }
         if (data.pair) meta.pair = {counts: data.pair.counts, overlap: data.pair.overlap, minTime: data.pair.minTime, maxTime: data.pair.maxTime};
-        self.postMessage({id, type: 'loaded', meta});
+        self.postMessage({id, type: 'loaded', meta, fingerprints});
       } else if (type === 'view') {
         const events = getEvents(msg.mode, msg.filter);
         let selected = eventById(msg.selected), selectedIndex = selected ? events.indexOf(selected) : -1;
