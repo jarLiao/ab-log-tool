@@ -1,7 +1,8 @@
 /* The worker owns parsed logs; original Files can be archived locally. */
 (function () {
   'use strict';
-  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.4.0', $ = id => document.getElementById(id);
+  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.5.0', $ = id => document.getElementById(id);
+  const sourceLabel=side=>({raw:'原始接收',filtered:'过滤之后',connection:'连接诊断'}[side]||side);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const num = value => Number(value || 0).toLocaleString('zh-CN');
   const bytes = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(1) + ' KB';
@@ -15,7 +16,7 @@
     parse: '#b13d38', uncertain: '#b13d38', rollback: '#b13d38', rawOnly: '#a34f05', filteredOnly: '#366cb4', pairOrder: '#067d75', pairUncertain: '#7743ad', matched: '#067d75'};
   let worker, pending = new Map(), requestId = 0, renderId = 0, meta = null;
   let mode = 'raw', inputMode = 'raw', selected = '', currentView = null, activeChart = {}, focused = true;
-  let files = {raw: null, filtered: null}, contextText = '', toastTimer, filterTimer, demo = false, started = 0;
+  let files = {raw: null, filtered: null,connection:null}, contextText = '', toastTimer, filterTimer, demo = false, started = 0;
   let inspection = null, logStates = [], detailKey = '', chartPoints = [];
   let archive = null, historyEntries = [], historyDelete = null, historyTicket = 0, taskTicket = 0;
   let historyWrite = Promise.resolve();
@@ -32,7 +33,7 @@
   }
   function startWorker() {
     endWorker();
-    const source = 'self.ABEngine=(' + window.ABEngineFactory.toString() + ')();(' + window.abWorkerMain.toString() + ')();';
+    const source = 'self.ABConnections=('+window.ABConnectionsFactory.toString()+')();self.ABEngine=(' + window.ABEngineFactory.toString() + ')(self.ABConnections);(' + window.abWorkerMain.toString() + ')();';
     const url = URL.createObjectURL(new Blob([source], {type: 'text/javascript'}));
     worker = new Worker(url);
     URL.revokeObjectURL(url);
@@ -65,14 +66,15 @@
     meta = null; selected = ''; currentView = null; contextText = ''; renderId++;
     $('workspace').hidden = true; $('welcome').hidden = false; $('exportBtn').disabled = true;
     document.querySelectorAll('[data-mode]').forEach(b => { b.disabled = true; });
-    $('rawCount').textContent = $('filteredCount').textContent = '—';
-    $('sourceNote').textContent = '导入一份日志独立分析，或导入同一次连接的两份日志进行比较。';
+    $('rawCount').textContent = $('filteredCount').textContent = $('connectionCount').textContent = '—';
+    $('sourceNote').textContent = '导入同一设备的日志，可附加连接诊断文件，按连接分段核对。';
   }
   function setInputMode(m) {
     inputMode = m;
     document.querySelectorAll('[data-input]').forEach(b => { b.classList.toggle('active', b.dataset.input === m); b.setAttribute('aria-pressed', String(b.dataset.input === m)); });
-    $('rawDrop').hidden = m === 'filtered'; $('filteredDrop').hidden = m === 'raw';
-    $('importDescription').textContent = m === 'pair' ? '选择同一设备、同一次连续连接的原始日志和过滤后日志。' :
+    $('rawDrop').hidden = !['raw','pair'].includes(m); $('filteredDrop').hidden = !['filtered','pair'].includes(m);
+    $('connectionOptional').textContent=m==='connection'?'（必选）':'（可选）';
+    $('importDescription').textContent = m==='connection'?'选择 bleConnection 日志，独立查看连接、断开、重试和错误。没有报文时不判断序号或恢复收包。':m === 'pair' ? '选择同一设备、同一次记录任务的原始日志和过滤后日志；可以包含多次重连。' :
       m === 'filtered' ? '选择 abFilter 过滤后日志。缺号可能来自正常过滤。' : '选择同一设备的 abBle 原始接收日志。无法确认连续性的序号跳变会分段并标记待核对。';
     $('importError').hidden = true;
   }
@@ -88,7 +90,7 @@
     try {
       for (const file of Object.values(selectedFiles)) {
         if (!file.size) throw new Error(file.name + ' 是空文件，请选择包含报文的日志。');
-        if (file.size > 128 * 1048576) throw new Error(file.name + ' 超过 128 MB，请按单次连接范围拆分后分析。');
+        if (file.size > 128 * 1048576) throw new Error(file.name + ' 超过 128 MB，请按完整连接范围拆分后分析。');
       }
       if ($('importDialog').open) $('importDialog').close();
       resetWorkspace(); startWorker();
@@ -101,17 +103,18 @@
       $('welcome').hidden = true; $('workspace').hidden = false; $('exportBtn').disabled = false;
       $('rawCount').textContent = meta.raw ? num(meta.raw.counts.frames) : '—';
       $('filteredCount').textContent = meta.filtered ? num(meta.filtered.counts.frames) : '—';
+      $('connectionCount').textContent=num(meta.connections.counts.events);
       document.querySelectorAll('[data-mode]').forEach(b => { b.disabled = !meta[b.dataset.mode]; });
       $('sessionStatus').textContent = (demo ? '演示数据 · ' : '') + ((performance.now() - started) / 1000).toFixed(2) + ' 秒完成';
-      $('sourceNote').innerHTML = Object.entries(meta).filter(([key]) => key !== 'pair').map(([key, s]) =>
-        '<strong>' + (key === 'raw' ? '原始接收' : '过滤之后') + '</strong>' + esc(s.name) + '<br>' + bytes(s.bytes) + ' · ' + esc(s.encoding) + '<br><br>').join('');
-      await changeMode(meta.raw ? 'raw' : 'filtered');
+      $('sourceNote').innerHTML = Object.entries(meta).filter(([key]) => !['pair','connections'].includes(key)).map(([key, s]) =>
+        '<strong>' + sourceLabel(key) + '</strong>' + esc(s.name) + '<br>' + bytes(s.bytes) + ' · ' + esc(s.encoding) + '<br><br>').join('');
+      await changeMode(meta.raw ? 'raw' : meta.filtered?'filtered':'connections');
       if (ticket !== taskTicket) return;
       if (isDemo) { $('historySaveStatus').textContent = '演示数据不保存到本机历史。'; return; }
       const sources = Object.entries(selectedFiles).map(([side, file]) => ({side, name: file.name, size: file.size}));
       const id = restored?.id || (sources.every(s => response.fingerprints[s.side]) ? JSON.stringify(sources.map(s => [s.side, s.name, response.fingerprints[s.side]])) :
         'task-' + (crypto.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2)));
-      const summary = Object.fromEntries(Object.entries(meta).filter(([side]) => side !== 'pair').map(([side, s]) => [side, {counts: s.counts, segments: s.segments}]));
+      const summary = Object.fromEntries(Object.entries(meta).filter(([side]) => !['pair','connections'].includes(side)).map(([side, s]) => [side, {counts: s.counts, segments: s.segments,connectionCount:s.connectionCount,connectionEvents:s.connectionEvents}]));
       const entry = {id, sources, summary, bytes: sources.reduce((n, s) => n + s.size, 0), version: VERSION, updatedAt: Date.now()};
       archive = {entry, files: {...selectedFiles}, saved: !!restored};
       if (restored) {
@@ -156,9 +159,9 @@
     const query = $('historySearch').value.trim().toLowerCase();
     const entries = historyEntries.filter(entry => entry.sources.some(s => s.name.toLowerCase().includes(query)));
     $('historyList').innerHTML = entries.map(entry => '<article class="history-item"><div class="history-info"><strong>' +
-      entry.sources.map(s => esc(s.name)).join('<br>') + '</strong><p>' + (entry.sources.length === 2 ? '配对任务' : entry.sources[0].side === 'raw' ? '原始接收' : '过滤之后') +
+      entry.sources.map(s => esc(s.name)).join('<br>') + '</strong><p>' + (entry.sources.some(s=>s.side==='raw')&&entry.sources.some(s=>s.side==='filtered')?'配对任务 · ':'')+entry.sources.map(s=>sourceLabel(s.side)).join(' + ') +
       ' · ' + bytes(entry.bytes) + ' · 最近打开 ' + esc(E.timestamp(entry.updatedAt).slice(0, 19)) + '</p><p>' +
-      entry.sources.map(s => { const summary = entry.summary[s.side]; return (s.side === 'raw' ? '原始 ' : '过滤 ') + num(summary.counts.frames) +
+      entry.sources.map(s => { const summary = entry.summary[s.side]; if(s.side==='connection')return '连接诊断 '+num(summary.connectionEvents)+' 条事件';return sourceLabel(s.side)+' '+ num(summary.counts.frames) +
         ' 帧 · ' + (summary.segments > 1 ? '段内' : '') + '缺号 ' + num(summary.counts.gap); }).join('；') +
       '</p></div><div class="history-item-actions"><button class="button primary" data-history-open="' + esc(entry.id) + '">打开</button>' +
       '<button class="button" data-history-delete="' + esc(entry.id) + '" aria-label="删除历史 ' + esc(entry.sources.map(s => s.name).join(' / ')) + '">删除</button></div></article>').join('');
@@ -213,11 +216,11 @@
   function currentFilter() {
     const t = id => $(id).value ? new Date($(id).value + '+08:00').getTime() : '';
     return {kind: $('kindFilter').value, query: $('search').value.trim(), command: $('commandFilter').value,
-      from: t('timeFrom'), to: t('timeTo'), coverage: $('coverageFilter').value};
+      from: t('timeFrom'), to: t('timeTo'), coverage: $('coverageFilter').value,connection:$('connectionFilter').value};
   }
   function clearFilters() {
     inspection = null;
-    $('search').value = $('commandFilter').value = $('timeFrom').value = $('timeTo').value = '';
+    $('search').value = $('commandFilter').value = $('timeFrom').value = $('timeTo').value = $('connectionFilter').value = '';
     $('kindFilter').value = $('coverageFilter').value = 'all';
   }
   function stats(items) {
@@ -232,8 +235,29 @@
   }
   async function changeMode(m) {
     mode = m; selected = ''; focused = true; activeChart = {side: m === 'filtered' ? 'filtered' : 'raw'};
+    $('workspace').classList.toggle('connection-view',m==='connections');
     clearFilters();
     document.querySelectorAll('[data-mode]').forEach(b => { b.classList.toggle('active', b.dataset.mode === m); b.setAttribute('aria-pressed', String(b.dataset.mode === m)); });
+    $('chartPanel').hidden=m==='connections';$('connectionGuide').hidden=m!=='connections';$('pairSessions').hidden=m!=='pair';
+    $('commandFilter').hidden=m==='connections';$('segmentSummary').hidden=true;
+    $('search').placeholder=m==='connections'?'事件 / 状态码 / 连接编号 / L行号':'0x8404 / 33796 / L行号';
+    const groups=m==='connections'?meta.connections.groups:m==='pair'?meta.pair.sessions.map(s=>({key:s.key,label:(s.connectionSource?sourceLabel(s.connectionSource)+' · ':'')+s.connection})):
+      [...new Map(meta[m].segmentRanges.map(p=>[p.connectionKey,{key:p.connectionKey,label:p.connection}])).values()];
+    $('connectionFilter').innerHTML='<option value="">全部连接</option>'+groups.map(g=>'<option value="'+esc(g.key)+'">'+esc(g.label)+'</option>').join('');
+    if(m==='connections'){
+      const s=meta.connections,c=s.counts;
+      $('viewTitle').textContent='连接时间线';$('resultTitle').textContent='连接事件';$('countHead').textContent='状态码';
+      $('fileDescription').textContent='共 '+num(c.events)+' 条事件 · 相同结构化事件保留各处原文 · 单独记录每个连接阶段';
+      $('chartSide').hidden=$('coverageLabel').hidden=true;
+      $('kindFilter').innerHTML='<option value="all">全部事件</option>'+s.kinds.map(k=>'<option value="'+esc(k)+'">'+esc(E.connectionLabels[k]||k)+'</option>').join('');
+      stats([['连接尝试',c.attempts,'开始连接记录','connect_attempt'],['连接就绪',c.ready,'需结合报文确认恢复','connection_ready'],
+        ['断开相关记录',c.disconnectEvents,'含不同回调，非断线次数'],['安排重试',c.retries,'查看等待时长','retry_scheduled'],
+        ['重试耗尽',c.exhausted,'查看停止位置','retries_exhausted','alert'],['错误 / 失败',c.errors,'状态码仅属于所在事件']]);
+      $('qualityNote').hidden=false;$('qualityNote').textContent=[...s.warnings,'日志事件只能说明观察到的状态，不能单凭 Disconnected 或后续错误码确定最初断线原因。'].join(' ');
+      $('coverage').textContent='时间为北京时间；时间回退时以同一文件的源行顺序核对。';
+      $('recoverySummary').innerHTML=s.recovery.length?s.recovery.map(r=>'<p class="recovery-item"><strong>'+esc(sourceLabel(r.source))+' · L'+r.line+' 断开 → L'+r.readyLine+' 就绪</strong><span>'+(r.ms==null?'间隔未知（时间戳回退）':num(r.ms)+' ms · '+esc(r.clock))+' · '+(r.dataLine?'L'+r.dataLine+' 观察到有效报文':'本文件未观察到后续恢复收包')+'</span></p>').join(''):'<p class="small">尚无可关联的“断开 → 再次就绪”记录。仅导入诊断文件时，无法据此确认是否恢复收包。</p>';
+      await requestView();return;
+    }
     $('viewTitle').textContent = m === 'pair' ? '原始 / 过滤日志配对' : m === 'raw' ? '原始接收日志' : '过滤后的日志';
     $('resultTitle').textContent = m === 'pair' ? '文件差异' : '异常列表';
     $('countHead').textContent = m === 'pair' ? '覆盖范围' : '数量';
@@ -254,25 +278,30 @@
       $('coverage').textContent = '原始 ' + shortTime(meta.raw.minTime) + '–' + shortTime(meta.raw.maxTime) +
         ' · 过滤 ' + shortTime(meta.filtered.minTime) + '–' + shortTime(meta.filtered.maxTime) + '（北京时间）';
       notices.push('配对只展示两份日志的差异，不自动判断过滤原因。');
+      $('pairSessionRows').innerHTML=meta.pair.sessions.map(s=>'<tr><td>'+esc((s.connectionSource?sourceLabel(s.connectionSource)+' · ':'')+s.connection)+'</td><td>'+num(s.matched)+'</td><td>'+num(s.rawOnly)+'</td><td>'+num(s.filteredOnly)+'</td><td>'+num(s.skip)+'</td></tr>').join('');
+      if(meta.filtered.associationNote)notices.push(meta.filtered.associationNote);
       if (!meta.pair.overlap) notices.push('两份文件没有可用的共有时间范围，覆盖范围标为待核对。');
       if (meta.raw.counts.parse + meta.filtered.counts.parse) notices.push('存在解析异常，损坏帧不参与配对。');
-      if (meta.raw.segments > 1 || meta.filtered.segments > 1) notices.push('存在序号分段，段间连续性待核对；配对仍按接收时间和完整报文逐次匹配。');
+      if (meta.raw.segments > 1 || meta.filtered.segments > 1) notices.push('序号按连接及待核对边界分段；配对仍按接收时间和完整报文逐次匹配。');
     } else {
       const s = meta[m], c = s.counts;
       $('fileDescription').textContent = s.name + ' · ' + bytes(s.bytes) + ' · ' + num(s.lineCount) + ' 行';
-      const items = [['有效报文', c.frames, num(s.diagnostics) + ' 行诊断文字'], [s.segments > 1 ? '段内最终缺号' : '最终缺号', c.gap, s.segments > 1 ? '段间数量待核对' : num(c.gapRanges) + ' 个区间', 'gap', 'alert'],
+      const gapScope=c.rollback||c.uncertain||s.unassociatedRanges?'段间数量待核对':s.connectionCount>1?'各连接独立统计':num(c.gapRanges)+' 个区间';
+      const items = [['有效报文', c.frames, num(s.diagnostics) + ' 行诊断文字'], [s.segments > 1 ? '段内最终缺号' : '最终缺号', c.gap, gapScope, 'gap', 'alert'],
         ['乱序补到', c.reorder, '已从缺号中移除', 'reorder'], ['重复记录', c.duplicate, '完整帧相同', 'duplicate'],
         ['同号不同内容', c.collision, s.segments > 1 ? '各段内部核对' : '单独核对', 'collision', 'special'], ['解析异常', c.parse, '保留原始证据', 'parse', c.parse ? 'alert' : '']];
       if (c.rollback) items.splice(2, 0, ['跳变待核对', c.rollback, '处边界，非丢包数量', 'rollback', 'alert']);
       stats(items);
       $('coverage').textContent = c.frames ? '覆盖 ' + shortTime(s.minTime) + '–' + shortTime(s.maxTime) + '（北京时间） · ' + s.wraps + ' 次回绕 · ' + s.segments + ' 个可分析段' : '没有可参与序号分析的完整有效报文';
       if (m === 'filtered') notices.push('过滤日志的缺号可能来自正常过滤，请结合原始日志核对。');
+      if(s.connectionCount>1)notices.push('识别到 '+s.connectionCount+' 个包含报文的连接 / 归属范围，分别统计；跨连接不拼接残帧，也不累计缺号和重复。');
+      if(s.associationNote)notices.push(s.associationNote);
       if (c.rollback) notices.push(c.rollback + ' 处序号跳变待核对，暂划分 ' + s.segments + ' 个分析段。跳变处数不是丢包数量；段内缺号为 0 不代表整份日志完整，段间连续性需要核对设备记录。');
       if (c.uncertain) notices.push(c.uncertain + ' 处序号跨度待核对；段内最终缺号不含跨段未决范围，可在类型筛选中查看。');
       if (s.segments > 1) {
         $('segmentSummary').hidden = false;
         $('segmentSummaryTitle').textContent = '查看 ' + s.segments + ' 个分析段的范围与段内缺号';
-        $('segmentRows').innerHTML = s.segmentRanges.map(p => '<tr><td>' + p.segment + '</td><td class="mono">L' + p.firstLine + '–L' + p.lastLine +
+        $('segmentRows').innerHTML = s.segmentRanges.map(p => '<tr><td>' + p.segment + '<small class="segment-connection">'+esc(p.connection)+'<br>'+esc(p.evidence)+(p.boundaryKind==='rollback'||p.boundaryKind==='uncertain'?' · 序号边界待核对':'')+'</small></td><td class="mono">L' + p.firstLine + '–L' + p.lastLine +
           '</td><td class="mono">' + E.hexWord(p.firstSid) + ' → ' + E.hexWord(p.lastSid) + '</td><td>' + num(p.frames) + '</td><td>' + num(p.gap) + '</td></tr>').join('');
       }
       if (c.parse) notices.push(c.parse + ' 条解析 / 校验异常；相关不可信序号未计为有效报文。');
@@ -296,12 +325,12 @@
   }
   function renderList() {
     const v = currentView;
-    $('sequenceHead').textContent = useHex() ? '序号 HEX / DEC' : '序号 DEC / HEX';
+    $('sequenceHead').textContent = mode==='connections'?'事件时间 / 连接':useHex() ? '序号 HEX / DEC' : '序号 DEC / HEX';
     $('eventRows').innerHTML = v.items.map(e => '<tr tabindex="0" data-id="' + e.id + '" class="' + (!inspection && e.id === selected ? 'selected' : '') +
-      '" aria-selected="' + (!inspection && e.id === selected) + '"><td><span class="tag ' + e.kind + '">' + E.title(e) +
-      '</span></td><td class="sequence-cell">' + sequenceMarkup(e) + '</td><td class="mono">' +
-      (mode === 'pair' ? e.coverage === 'inside' ? '共有范围内' : e.coverage === 'outside' ? '共有范围外' : '无共有范围' : e.kind === 'gap' ? num(e.count) : '—') +
-      '</td><td class="mono">' + (mode === 'pair' ? e.source === 'raw' ? '原 ' : '滤 ' : '') + 'L' + e.line +
+      '" aria-selected="' + (!inspection && e.id === selected) + '"><td>'+(mode==='connections'?'<button class="timeline-select" aria-label="查看 '+esc(E.title(e))+' 原文 L'+e.line+'">':'')+'<span class="tag ' + e.kind + '">' + esc(E.title(e)) +
+      '</span>'+(mode==='connections'?'</button>':'')+'</td><td class="sequence-cell">' + (mode==='connections'?'<span class="mono timeline-time"><span>'+esc(E.timestamp(e.t).slice(0,10))+'</span> <span>'+esc(shortTime(e.t))+'</span></span><small class="segment-connection">'+esc(e.connection)+'</small>':sequenceMarkup(e)) + '</td><td class="mono">' +
+      (mode==='connections'?e.status==null?'—':e.status:mode === 'pair' ? e.coverage === 'inside' ? '共有范围内' : e.coverage === 'outside' ? '共有范围外' : '无共有范围' : e.kind === 'gap' ? num(e.count) : '—') +
+      '</td><td class="mono">' + (mode==='connections'?'<span class="timeline-source">'+esc(sourceLabel(e.source))+'</span> ':mode === 'pair' ? e.source === 'raw' ? '原 ' : '滤 ' : '') + 'L' + e.line +
       (e.endLine !== e.line ? '–' + e.endLine : '') + '</td></tr>').join('');
     $('resultCount').textContent = num(v.total) + ' 条';
     $('empty').hidden = v.total > 0;
@@ -429,15 +458,22 @@
       E.hexWord(c.sid) + ' · ' + (E.hexByte(c.cmd) || '—') + ' / ' + (E.hexByte(c.key) || '—') + '</button>').join('') : '';
     $('recordChoices').hidden = !d.choices || d.choices.length < 2;
     $('eventID').textContent = e.id;
-    $('detailTitle').innerHTML = '<span class="tag ' + e.kind + '">' + E.title(e) + '</span> <span class="detail-sequence">' + sequenceMarkup(e) + '</span>';
+    $('detailTitle').innerHTML = '<span class="tag ' + e.kind + '">' + esc(E.title(e)) + '</span> <span class="detail-sequence">' + (e.kind==='connection'?esc(e.connection):sequenceMarkup(e)) + '</span>';
     $('detailSummary').textContent = d.description;
     const fields = [['源行范围', 'L' + e.line + (e.endLine !== e.line ? '–L' + e.endLine : '')],
       ['接收时间', E.timestamp(e.t) || '—'], ['命令 / Key', d.frame ? (d.frame.cmd || '—') + ' / ' + (d.frame.key || '—') : '— / —'],
       ['可分析段 / 序号周期', d.frame ? d.frame.segment + ' / ' + d.frame.cycle : '—']];
+    if(e.connection||d.frame?.connection)fields.push(['连接会话',e.connection||d.frame.connection],['连接归属依据',d.frame?.connectionEvidence||e.group?.evidence||e.connectionEvidence||'待核对']);
+    if(e.kind==='connection'){
+      if(e.status!=null)fields.push(['本次事件状态码',e.status+' / 0x'+(e.status>>>0).toString(16).toUpperCase()]);
+      if(e.fields?.number)fields.push(['本轮尝试次数',e.fields.number]);
+      if(e.fields?.delay_ms)fields.push(['重试等待',e.fields.delay_ms+' ms']);
+      if(e.event==='connection_ready')fields.push(['恢复收包证据',e.recovery?.dataLine?'本文件 L'+e.recovery.dataLine:'请核对后续有效报文']);
+    }
     if (e.previousSid != null) fields.push(['观测到的数值变化', e.numericChange], ['判定状态', e.directionHint]);
     if (d.frame) fields.push(['与上包间隔', d.frame.timing.label], ['上一有效报文', d.frame.timing.previous ? E.hexWord(d.frame.timing.previous.sid) + ' / L' + d.frame.timing.previous.line : '—（首包）']);
     $('fields').innerHTML = fields.map(([a, b]) => '<div class="field"><span>' + a + '</span><strong class="mono">' + esc(b) + '</strong></div>').join('');
-    contextText = '[' + e.id + '] ' + E.title(e) + ' ' + E.dualLabel(e) + '\n' + d.description + '\n\n' +
+    contextText = '[' + e.id + '] ' + E.title(e) + ' ' + E.dualLabel(e) + '\n' + d.description + '\n连接会话：'+(e.connection||d.frame?.connection||'待核对')+'\n\n' +
       d.sections.map(s => s.name + '\n' + (s.frame ? '原文字节 ' + s.frame.seqBytes + ' → ' + s.frame.sidHex + ' = DEC ' + s.frame.sid + '（小端）\n' : '') +
         (s.frame ? '命令 / Key：' + (s.frame.cmd || '—') + ' / ' + (s.frame.key || '—') + '\n' : '') +
         (s.frame ? E.timingText(s.frame.timing) + '\n' : '') +
@@ -469,7 +505,7 @@
     $('codeSections').scrollTop = 0;
   }
   function renderChart() {
-    if (!currentView || $('workspace').hidden) return;
+    if (!currentView || $('workspace').hidden || mode==='connections') return;
     const c = currentView.chart, svg = $('chart'), W = Math.max(300, svg.clientWidth), H = svg.clientHeight || 224;
     const ml = useHex() ? (W < 500 ? 61 : 73) : (W < 500 ? 48 : 61), mr = 20, mt = 21, mb = 35;
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
@@ -508,7 +544,7 @@
         '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#285cce" stroke-dasharray="3 4" opacity=".5"/><circle cx="' + x(inspectedFrame.index) +
         '" cy="' + y(inspectedFrame.sid) + '" r="5" fill="#285cce" stroke="#fff" stroke-width="1.5"/></g>';
     }
-    for (const wrap of c.wraps) out += '<line x1="' + x(wrap.index) + '" x2="' + x(wrap.index) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#8295ae" stroke-dasharray="4 4"><title>' + wrap.label + ' · 记录 ' + (wrap.index + 1) + '</title></line>';
+    for (const wrap of c.wraps) out += '<g class="chart-boundary" role="button" tabindex="0" data-record-index="'+wrap.index+'" aria-label="'+esc(wrap.label)+'"><title>'+esc(wrap.label)+' · 记录 '+(wrap.index+1)+'</title><rect x="'+(x(wrap.index)-12)+'" y="'+mt+'" width="24" height="'+(H-mb-mt)+'" fill="transparent"/><line x1="' + x(wrap.index) + '" x2="' + x(wrap.index) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#067d75" stroke-dasharray="4 4"/><text x="'+x(wrap.index)+'" y="12" text-anchor="middle" fill="#067d75" font-size="11">'+(wrap.label.startsWith('连接')?'连接边界':'分段 / 回绕')+'</text></g>';
     const markerTotals = new Map(), markerSlots = new Map();
     for (const m of c.markers) markerTotals.set(m.index, (markerTotals.get(m.index) || 0) + 1);
     for (const m of c.markers) {
@@ -586,7 +622,7 @@
   $('recordNext').onclick = () => inspectRecord({source: currentView.detail.event.source, index: currentView.detail.frame.index + 1});
   $('backToEvent').onclick = () => select(selected);
   document.querySelectorAll('[data-input]').forEach(b => { b.onclick = () => setInputMode(b.dataset.input); });
-  for (const side of ['raw', 'filtered']) {
+  for (const side of ['raw', 'filtered','connection']) {
     const input = $(side + 'File'), zone = $(side + 'Drop');
     input.onchange = () => chooseFile(side, input.files[0]);
     zone.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
@@ -602,14 +638,16 @@
   window.addEventListener('drop', e => e.preventDefault());
   $('analyzeBtn').onclick = () => {
     const task = {};
-    if (inputMode !== 'filtered') task.raw = files.raw;
-    if (inputMode !== 'raw') task.filtered = files.filtered;
+    if (['raw','pair'].includes(inputMode)) task.raw = files.raw;
+    if (['filtered','pair'].includes(inputMode)) task.filtered = files.filtered;
+    if(inputMode==='connection'||files.connection)task.connection=files.connection;
     if (Object.values(task).some(f => !f)) {
       $('importError').textContent = inputMode === 'pair' ? '请选择原始日志和过滤后日志。' : '请先选择一份日志。';
       $('importError').hidden = false; return;
     }
     analyze(task);
   };
+  $('clearConnectionFile').onclick=()=>{chooseFile('connection',null);$('connectionFile').value='';};
   $('cancelAnalysis').onclick = () => { taskTicket++; endWorker(); $('progressDialog').close(); resetWorkspace(); toast('分析已取消，未生成最终结果。'); };
   $('progressDialog').addEventListener('cancel', e => { e.preventDefault(); $('cancelAnalysis').click(); });
   $('demoBtn').onclick = () => {
@@ -622,7 +660,7 @@
     analyze({raw: new File([raw], '演示_abBle.txt'), filtered: new File([filtered], '演示_abFilter.txt')}, true);
   };
   document.querySelectorAll('[data-mode]').forEach(b => { b.onclick = () => changeMode(b.dataset.mode); });
-  $('kindFilter').onchange = $('commandFilter').onchange = $('coverageFilter').onchange = $('timeFrom').onchange = $('timeTo').onchange = () => { inspection = null; selected = ''; requestView(); };
+  $('kindFilter').onchange = $('commandFilter').onchange = $('connectionFilter').onchange = $('coverageFilter').onchange = $('timeFrom').onchange = $('timeTo').onchange = () => { inspection = null; selected = ''; requestView(); };
   $('search').oninput = () => { clearTimeout(filterTimer); filterTimer = setTimeout(() => { inspection = null; selected = ''; requestView(); }, 180); };
   $('resetFilter').onclick = () => { clearFilters(); selected = ''; requestView(); };
   $('moreFilter').onclick = () => { $('extraFilters').hidden = !$('extraFilters').hidden; $('moreFilter').setAttribute('aria-expanded', String(!$('extraFilters').hidden)); };

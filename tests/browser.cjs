@@ -82,7 +82,8 @@ async function importTask(page,mode,raw,filtered){
       ok('CSV exports the added HEX and original byte columns',csv.toString().includes('消息序号HEX')&&csv.toString().includes('序号原始字节LE'));
       await page.locator('#exportRange').selectOption('all');
       const download2=page.waitForEvent('download');await page.locator('#csvBtn').click();const d2=await download2;await d2.saveAs(path.join(out,'all.csv'));
-      ok('Default all-results export includes both independent analyses and pair differences',fs.readFileSync(path.join(out,'all.csv'),'utf8').split('\r\n').filter(Boolean).length===251);
+      const allCsv=fs.readFileSync(path.join(out,'all.csv'),'utf8');
+      ok('Default all-results export includes both analyses, pair differences and observed connection data',allCsv.split('\r\n').filter(Boolean).length===252&&allCsv.includes('首次观察到有效报文'));
       const download3=page.waitForEvent('download');await page.locator('#txtBtn').click();const d3=await download3;await d3.saveAs(path.join(out,'all-context.txt'));
       const text=fs.readFileSync(path.join(out,'all-context.txt'),'utf8');
       ok('TXT includes event IDs and both original filenames',text.includes('[R00001]')&&text.includes('[F00001]')&&text.includes('[P00001]')&&text.includes('abBle_260413_145449.txt')&&text.includes('L302'));
@@ -134,6 +135,7 @@ async function importTask(page,mode,raw,filtered){
       }
       await page.setViewportSize({width:1440,height:1080});
       await page.locator('#exportBtn').click();
+      await page.locator('#exportRange').selectOption('filtered');
       const csvDownload=page.waitForEvent('download');await page.locator('#csvBtn').click();const csvFile=await csvDownload;
       const csvPath=path.join(out,'rollback.csv');await csvFile.saveAs(csvPath);const csv=fs.readFileSync(csvPath,'utf8');
       ok('Boundary CSV downloads all six boundaries with before IDs and conditional scope',csv.split('\r\n').filter(Boolean).length===7&&csv.includes('前一报文序号HEX')&&csv.includes('0xD848')&&csv.includes('按段统计；段间待核对'));
@@ -143,7 +145,7 @@ async function importTask(page,mode,raw,filtered){
       await page.locator('#exportDialog [data-close]').click();
       await importTask(page,'pair',process.env.AB_ROLLBACK_LOG,process.env.AB_ROLLBACK_LOG);
       await page.locator('[data-mode="pair"]').click();await expectCount(page,'matched',27888);
-      ok('Segmenting does not change exact frame pairing or leak the single-file segment table',await readCount(page,'rawOnly')===0&&await readCount(page,'filteredOnly')===0&&!await page.locator('#segmentSummary').isVisible()&&(await page.locator('#qualityNote').innerText()).includes('段间连续性待核对'));
+      ok('Segmenting does not change exact frame pairing or leak the single-file segment table',await readCount(page,'rawOnly')===0&&await readCount(page,'filteredOnly')===0&&!await page.locator('#segmentSummary').isVisible()&&(await page.locator('#qualityNote').innerText()).includes('待核对边界分段'));
       await page.locator('[data-mode="filtered"]').click();await expectCount(page,'rollback',6);
       ok('Filtered mode independently exposes the same six uncertain boundaries',await page.locator('#segmentSummary').isVisible()&&(await page.locator('#qualityNote').innerText()).includes('过滤日志的缺号可能来自正常过滤'));
     }

@@ -1,0 +1,76 @@
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const {pathToFileURL}=require('node:url');
+const {chromium}=require(process.env.AB_PLAYWRIGHT_PATH||'playwright');
+const E=require('../dist/engine.js'),root=path.resolve(__dirname,'..'),out=path.join(root,'artifacts','connections-check');
+fs.mkdirSync(out,{recursive:true});
+const base=1800000000000;
+const b=(n,event,t,extra='')=>`ble_event ${base+t}, elapsed_ms=${t}, connection=${n}, event=${event}${extra?', '+extra:''}`;
+const s=(n,event,t)=>`ble_session ${base+t}, connection=${n}, event=${event}`;
+const packet=(sid,t)=>`${base+t},${E.makeFrame(sid,[0x7b,3,0x11,0])}`;
+const raw=[b(0,'process_start',0),b(1,'connect_attempt',1,'number=1'),s(1,'start',2),b(1,'connection_ready',3),packet(100,4),packet(101,5),
+  b(1,'error',6,'status=8, status_hex=0x08'),b(1,'disconnected',7),s(1,'end',8),b(1,'retry_scheduled',9,'delay_ms=2000'),
+  b(2,'connect_attempt',2009,'number=2'),s(2,'start',2010),b(2,'link_connected',2011),b(2,'connection_ready',2012),packet(100,2013),packet(101,2014),
+  `reorder_skip ${base+2014}, from=102, to=101, reason=backward_dup`].join('\n');
+const filtered=[packet(100,4),packet(101,5),packet(100,2013)].join('\n');
+const diagnostic=raw.split('\n').filter(l=>l.startsWith('ble_event')).join('\n');
+const file=(name,text)=>({name,mimeType:'text/plain',buffer:Buffer.from(text)});
+const waitText=(p,selector,text)=>p.waitForFunction(({selector,text})=>document.querySelector(selector)?.textContent.includes(text),{selector,text});
+const report={checks:[],errors:[],requests:[]};const ok=(name,value)=>{assert.ok(value,name);report.checks.push(name);};
+const profile=fs.mkdtempSync(path.join(out,'profile-'));
+const url=process.env.AB_PREVIEW_URL||'http://127.0.0.1:4178';
+const setup=p=>{p.setDefaultTimeout(18000);p.on('pageerror',e=>report.errors.push(e.message));p.on('request',r=>report.requests.push(r.url()));};
+(async()=>{
+  const launch=()=>chromium.launchPersistentContext(profile,{headless:true,executablePath:process.env.AB_BROWSER||'C:/Program Files/Google/Chrome/Application/chrome.exe',viewport:{width:1440,height:1100},acceptDownloads:true});
+  let context=await launch(),page=context.pages()[0];setup(page);
+  try{
+    await page.goto(url);await page.locator('#newTask').click();await page.locator('[data-input="pair"]').click();
+    await page.locator('#rawFile').setInputFiles(file('synthetic_abBle.txt',raw));
+    await page.locator('#filteredFile').setInputFiles(file('synthetic_abFilter.txt',filtered));
+    await page.locator('#connectionFile').setInputFiles(file('synthetic_bleConnection.txt',diagnostic));
+    await page.locator('#analyzeBtn').click();await waitText(page,'#historySaveStatus','已保存');
+    ok('Three input files load and save in one task',await page.evaluate(async()=>{const e=(await ABHistory.list())[0];return e.sources.length===3&&Object.keys((await ABHistory.get(e.id)).files).length===3;}));
+    ok('Real connection reuse is not a duplicate or missing range',(await page.locator('[data-count="duplicate"] .stat-num').innerText())==='0'&&(await page.locator('[data-count="gap"] .stat-num').innerText())==='0');
+    await page.locator('#segmentSummary summary').click();ok('Both connection segments and their provenance are visible',(await page.locator('#segmentRows').innerText()).includes('有序收包会话开始')&&await page.locator('#segmentRows tr').count()===2);
+    await page.locator('.chart-boundary').click();await waitText(page,'.packet-timing','跨连接');
+    ok('Boundary click selects the first packet and keeps the actual cross-connection interval',(await page.locator('#fields').innerText()).includes('2008 ms')&&(await page.locator('.packet-timing').innerText()).includes('跨连接'));
+    await page.locator('[data-mode="pair"]').click();await waitText(page,'#resultTitle','文件差异');await page.locator('#pairSessions summary').click();
+    ok('Pair view includes per-connection totals and one documented skip',await page.locator('#pairSessionRows tr').count()===2&&(await page.locator('#detailSummary').innerText()).includes('reorder_skip')&&await page.locator('.raw-section').count()===2);
+    await page.locator('[data-mode="filtered"]').click();await waitText(page,'#viewTitle','过滤后的日志');
+    ok('Filtered sequence analysis adopts only unique raw packet anchors',(await page.locator('[data-count="duplicate"] .stat-num').innerText())==='0'&&(await page.locator('#qualityNote').innerText()).includes('唯一'));
+    await page.locator('[data-mode="connections"]').click();await waitText(page,'#resultTitle','连接事件');
+    ok('Timeline differentiates attempts, ready and observed packets',!await page.locator('#chartPanel').isVisible()&&(await page.locator('#eventRows').innerText()).includes('首次观察到有效报文')&&(await page.locator('#recoverySummary').innerText()).includes('2,005 ms'));
+    await page.locator('#moreFilter').click();
+    const connectionKey=await page.locator('#connectionFilter option').evaluateAll(options=>options.find(o=>o.textContent==='连接 #1').value);
+    await page.locator('#connectionFilter').selectOption(connectionKey);await waitText(page,'#detailTitle','开始连接');
+    ok('Connection selection limits the event list without changing summary counts',!(await page.locator('#eventRows').innerText()).includes('连接 #2')&&(await page.locator('[data-count="connect_attempt"] .stat-num').innerText())==='2');
+    await page.locator('#resetFilter').click();await waitText(page,'#eventRows','连接 #2');
+    await page.locator('#kindFilter').selectOption('error');await waitText(page,'#detailTitle','连接错误');
+    ok('Error event exposes the actual status and both mirrored source anchors',(await page.locator('#fields').innerText()).includes('8 / 0x8')&&await page.locator('.raw-section').count()===2);
+    await page.locator('.timeline-select').focus();await page.keyboard.press('Enter');await waitText(page,'#detailTitle','连接错误');
+    const rawSection=page.locator('.raw-section').first();await rawSection.locator('[data-log-line="8"]').click();await waitText(page,'#detailTitle','连接已断开');
+    ok('Clicking a connection source line updates the event detail',(await page.locator('#detailSummary').innerText()).includes('disconnected')&&await page.locator('.seq-byte-mark').count()===0);
+    await page.locator('#backToEvent').click();await waitText(page,'#detailTitle','连接错误');
+    await page.locator('#exportBtn').click();await page.locator('#exportRange').selectOption('filtered');
+    let wait=page.waitForEvent('download');await page.locator('#csvBtn').click();await(await wait).saveAs(path.join(out,'connection.csv'));
+    const csv=fs.readFileSync(path.join(out,'connection.csv'),'utf8');ok('Timeline CSV contains one filtered error event, ID and status',csv.trim().split('\r\n').length===2&&csv.includes('连接编号')&&csv.includes('"error","8"'));
+    wait=page.waitForEvent('download');await page.locator('#txtBtn').click();await(await wait).saveAs(path.join(out,'connection.txt'));
+    const txt=fs.readFileSync(path.join(out,'connection.txt'),'utf8');ok('TXT retains both mirrored originals',txt.includes('synthetic_abBle.txt')&&txt.includes('synthetic_bleConnection.txt')&&txt.includes('status=8'));
+    await page.locator('#exportDialog [data-close]').click();await page.locator('#kindFilter').selectOption('all');await waitText(page,'#eventRows','首次观察到有效报文');
+    await page.screenshot({path:path.join(out,'timeline-desktop.png'),fullPage:true});
+    await context.close();context=await launch();page=context.pages()[0];setup(page);await page.goto(url);await page.locator('#historyBtn').click();await page.locator('[data-history-open]').click();await waitText(page,'#historySaveStatus','已从本机历史打开');
+    await page.locator('[data-mode="connections"]').click();await waitText(page,'#resultTitle','连接事件');
+    ok('A full browser restart restores and reparses all three original files',(await page.locator('#sourceNote').innerText()).includes('synthetic_bleConnection.txt')&&(await page.locator('#recoverySummary').innerText()).includes('2,005 ms'));
+    await page.emulateMedia({reducedMotion:'reduce'});await page.setViewportSize({width:375,height:812});
+    ok('Small-screen timeline has no document overflow',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    await page.screenshot({path:path.join(out,'timeline-mobile.png'),fullPage:true});
+    await page.setViewportSize({width:812,height:375});ok('Landscape timeline keeps all page content reachable',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    await page.setViewportSize({width:1440,height:1100});await page.locator('#newTask').click();await page.locator('[data-input="connection"]').click();
+    await page.locator('#connectionFile').setInputFiles(file('diagnostic-only.txt',diagnostic));await page.locator('#analyzeBtn').click();await waitText(page,'#sourceNote','diagnostic-only.txt');await waitText(page,'#eventRows','连接错误');
+    ok('Diagnostic-only import works without fake valid packets',(await page.locator('#recoverySummary').innerText()).includes('未观察到后续恢复收包')&&await page.locator('[data-mode="raw"]').isDisabled());
+    const offline=await context.newPage();setup(offline);await offline.goto(pathToFileURL(path.join(root,'dist','index.html')).href);await offline.locator('#newTask').click();await offline.locator('[data-input="connection"]').click();
+    await offline.locator('#rememberLogs').uncheck();await offline.locator('#connectionFile').setInputFiles(file('offline.txt',diagnostic));await offline.locator('#analyzeBtn').click();await waitText(offline,'#viewTitle','连接时间线');
+    ok('Direct file preview embeds the complete worker including connection parser',(await offline.locator('#eventRows').innerText()).includes('连接错误'));
+    ok('No browser runtime errors',report.errors.length===0);ok('Log analysis makes no remote requests',report.requests.every(u=>u.startsWith(url)||u.startsWith('file:')||u.startsWith('blob:')));
+    report.success=true;report.browser=context.browser()?.version();
+  }finally{fs.writeFileSync(path.join(out,'report.json'),JSON.stringify(report,null,2));await context.close();console.log(JSON.stringify(report,null,2));}
+})().catch(e=>{console.error(e);process.exitCode=1;});

@@ -14,6 +14,111 @@ function frame(sid, body = [0x7b, 3, 0x12, 0], flags = 0) {
 const base = 1800000000000;
 const lines = ids => ids.map((id, i) => (base + i) + ',' + (typeof id === 'number' ? frame(id) : id)).join('\n');
 const parse = (ids, side = 'raw') => E.parse(lines(ids), side + '.txt', side);
+const session=(id,event,t=base)=>`ble_session ${t}, connection=${id}, event=${event}`;
+const ble=(id,event,t=base,extra='')=>`ble_event ${t}, elapsed_ms=${t-base}, connection=${id}, event=${event}${extra?', '+extra:''}`;
+
+test('real sessions reset duplicates, gaps and sequence lookahead without creating heuristic anomalies',()=>{
+  for(const second of [[100,101],[104,105],[47995,47996,47997,47998]]){
+    const s=E.parse([session(1,'start'),lines([100,101]),session(1,'end'),session(2,'start'),lines(second),session(2,'end')].join('\n'));
+    zeros(s);assert.equal(s.segments,2);assert.equal(s.connectionCount,2);
+    assert.equal(s.rows[2].boundaryKind,'connection');assert.equal(E.packetTiming(s,s.rows[2]).acrossConnection,true);
+    assert.ok(E.chart({raw:s},'raw',{}).wraps[0].label.includes('连接'));
+  }
+});
+test('neither a partial header nor partial body can be assembled across an ordered connection boundary',()=>{
+  for(const cut of [6,16,20]){
+    const f=frame(100),s=E.parse([session(1,'start'),base+','+f.slice(0,cut),session(1,'end'),session(2,'start'),base+','+f.slice(cut),(base+1)+','+frame(101)].join('\n'));
+    assert.deepEqual(s.rows.map(r=>r.sid),[101]);assert.ok(s.counts.parse>0);
+  }
+});
+test('queued old-session data completes before ordered end, despite earlier diagnostic disconnect',()=>{
+  const f=frame(100),s=E.parse([session(1,'start'),base+','+f.slice(0,16),ble(1,'disconnected'),base+','+f.slice(16),session(1,'end'),session(2,'start'),lines([100])].join('\n'));
+  assert.equal(s.counts.frames,2);assert.equal(s.counts.parse,0);assert.equal(s.counts.duplicate,0);assert.equal(s.segments,2);
+});
+test('a stale end and repeated start do not cut the active session or create extra boundaries',()=>{
+  const f=frame(100),s=E.parse([session(2,'start'),base+','+f.slice(0,16),session(1,'end'),session(2,'start'),base+','+f.slice(16),lines([101])].join('\n'));
+  assert.equal(s.counts.frames,2);zeros(s);assert.equal(s.segments,1);
+});
+test('process restart isolates a reused connection ID and sequence number',()=>{
+  const s=E.parse([ble(0,'process_start'),session(1,'start'),lines([100]),ble(0,'process_start',base+10),session(1,'start',base+11),lines([100])].join('\n'));
+  assert.equal(s.segments,2);assert.equal(s.counts.duplicate,0);assert.notEqual(s.rows[0].connectionKey,s.rows[1].connectionKey);
+});
+test('legacy disconnect and multiline error are diagnostic evidence and also break byte assembly',()=>{
+  const f=frame(100),s=E.parse([base+','+f.slice(0,16),`${base+1},ECW212 Disconnected`,`${base+2},ECW212 Link-lossOccur`,`${base+3},ECW212 onError`,'Error on connection state change (147)',base+','+f.slice(16),`${base+4},ECW212 Connected`,lines([101])].join('\n'));
+  assert.deepEqual(s.rows.map(r=>r.sid),[101]);assert.equal(s.connectionEvents.length,4);
+  const t=E.connections({raw:s}),e=t.events.find(e=>e.event==='error');assert.equal(e.status,147);assert.equal(e.endLine,5);
+  assert.equal(E.detail({raw:s,connections:t},e).frame,null);assert.ok(e.reason.includes('最初断线原因'));
+});
+test('structured diagnostic-only file has a usable timeline and no fabricated packet or parse error',()=>{
+  const s=E.parse([ble(1,'connect_attempt',base,'number=1'),ble(1,'link_connected',base+1),ble(1,'connection_ready',base+2),ble(1,'error',base+3,'status=8'),ble(1,'retry_scheduled',base+4,'delay_ms=2000')].join('\n'),'bleConnection.txt','connection');
+  const data={connection:s};data.connections=E.connections(data);
+  assert.equal(s.rows.length,0);assert.equal(s.counts.parse,0);assert.equal(data.connections.events.length,5);
+  assert.equal(E.selectEvents(data,'connections',{kind:'error'})[0].status,8);
+  assert.equal(E.inspect(data,{source:'connection',line:4}).detail.event.event,'error');
+  assert.equal(E.chart(data,'connections',{}).total,0);
+  assert.ok(E.exportParts(data,data.connections.events,'csv').join('').includes('状态码'));
+  assert.ok(E.exportParts(data,data.connections.events,'txt').join('').includes('ble_event'));
+  const filtered=parse([100],'filtered'),observed=E.connections({filtered}).events[0];
+  assert.equal(observed.source,'filtered');assert.ok(observed.reason.includes('过滤后记录'));
+});
+test('identical mirrored events deduplicate with both original file anchors; repeated lines stay explicit',()=>{
+  const b=ble(1,'error',base,'status=8'),raw=E.parse(b,'raw.txt','raw'),connection=E.parse(b,'connection.txt','connection');
+  const data={raw,connection};data.connections=E.connections(data);
+  assert.equal(data.connections.events.length,1);assert.equal(data.connections.events[0].refs.length,2);
+  assert.equal(E.detail(data,data.connections.events[0]).sections.length,2);assert.equal(data.connections.warnings.length,0);
+  const repeated=E.parse(b+'\n'+b,'raw.txt','raw');assert.equal(E.connections({raw:repeated,connection}).events.length,3);
+});
+test('unrelated diagnostic IDs and wall times cannot manufacture raw session boundaries',()=>{
+  const raw=parse([100,102]),connection=E.parse(ble(1,'disconnected'),'connection.txt','connection');
+  const t=E.connections({raw,connection});assert.equal(raw.segments,1);assert.equal(raw.counts.gap,1);assert.equal(t.warnings.length,1);
+});
+test('recovery separates ready from observed data and uses monotonic duration',()=>{
+  const raw=E.parse([session(1,'start'),lines([100]),ble(1,'disconnected',base+10),session(1,'end'),ble(2,'connect_attempt',base+20,'number=2'),
+    session(2,'start'),ble(2,'connection_ready',base+30),lines([101])].join('\n'));
+  const t=E.connections({raw});assert.equal(t.recovery.length,1);assert.equal(t.recovery[0].ms,20);assert.equal(t.recovery[0].dataLine,8);
+  const ready=t.events.find(e=>e.event==='connection_ready');assert.ok(ready.reason.includes('就绪不等于'));
+  const noData=E.parse([ble(1,'disconnected'),ble(2,'connection_ready',base+30)].join('\n'),'d.txt','connection');
+  assert.equal(E.connections({connection:noData}).recovery[0].dataLine,null);
+});
+test('a mirrored timeline keeps recovery events present only in the diagnostic file',()=>{
+  const start=ble(1,'connect_attempt'),raw=E.parse(start),connection=E.parse([start,ble(1,'disconnected',base+1),ble(2,'connection_ready',base+5)].join('\n'),'d.txt','connection');
+  assert.equal(E.connections({raw,connection}).recovery[0].ms,4);
+});
+test('packets received before ready do not hide later recovery evidence or bridge a second disconnect',()=>{
+  const prefix=[ble(1,'disconnected'),ble(2,'connect_attempt',base+2),session(2,'start'),lines([100]),ble(2,'connection_ready',base+4)];
+  const s=E.parse([...prefix,lines([101])].join('\n'));
+  assert.equal(E.connections({raw:s}).recovery[0].dataLine,6);
+  const stopped=E.parse([...prefix,ble(2,'disconnected',base+5),session(2,'end'),session(3,'start'),lines([101])].join('\n'));
+  assert.equal(E.connections({raw:stopped}).recovery[0].dataLine,null);
+  const unnumbered=E.parse([...prefix,session(2,'end'),lines([101])].join('\n'));
+  assert.equal(E.connections({raw:unnumbered}).recovery[0].dataLine,null);
+});
+test('manual stop and process restart end recovery attribution; wall-clock rollback is unknown',()=>{
+  for(const stop of ['connection_stopped','process_start']){
+    const s=E.parse([ble(1,'disconnected'),ble(1,stop,base+1),ble(2,'connection_ready',base+3)].join('\n'));
+    assert.equal(E.connections({raw:s}).recovery.length,0);
+  }
+  const s=E.parse([`${base},ECW212 Disconnected`,`${base-10},ECW212 Connected`].join('\n'));
+  assert.equal(E.connections({raw:s}).recovery[0].ms,null);
+});
+test('unique exact raw anchors transfer sessions to filtered rows without false cross-session duplicate counts',()=>{
+  const raw=E.parse([session(1,'start'),base+','+frame(100),session(1,'end'),session(2,'start'),(base+10)+','+frame(100)].join('\n'));
+  const filtered=E.parse([base+','+frame(100),(base+10)+','+frame(100)].join('\n'),'filtered.txt','filtered');
+  assert.equal(filtered.counts.duplicate,1);const pair=E.compare(raw,filtered);
+  assert.equal(filtered.counts.duplicate,0);assert.equal(filtered.segments,2);assert.equal(pair.sessions.length,2);assert.equal(pair.counts.matched,2);
+});
+test('non-unique filtered anchors remain explicitly unresolved and do not claim a connection',()=>{
+  const raw=E.parse([session(1,'start'),base+','+frame(100),session(1,'end'),session(2,'start'),base+','+frame(100)].join('\n'));
+  const filtered=E.parse(base+','+frame(100),'f.txt','filtered');E.compare(raw,filtered);
+  assert.equal(filtered.rows[0].connection,'连接归属待核对');assert.ok(filtered.associationNote.includes('无法唯一关联'));
+});
+test('skip evidence requires one exact timestamp/SID candidate and is exported with original context',()=>{
+  const raw=E.parse([base+','+frame(100),`reorder_skip ${base}, from=101, to=100, reason=backward_dup`].join('\n'));
+  const filtered=E.parse((base+1)+','+frame(101),'f.txt','filtered'),pair=E.compare(raw,filtered),e=pair.events.find(e=>e.kind==='rawOnly');
+  assert.equal(e.skipLine,2);assert.equal(E.detail({raw,filtered},e).sections.at(-1).line,2);
+  const ambiguous=E.parse([base+','+frame(100),base+','+frame(100,[1,3,0,0]),`reorder_skip ${base}, from=101, to=100, reason=backward_dup`].join('\n'));
+  assert.ok(E.compare(ambiguous,filtered).events.every(e=>!e.skipLine));
+});
 const kinds = (s, type) => s.events.filter(e => e.kind === type);
 const zeros = s => {
   for (const k of ['gap', 'reorder', 'duplicate', 'collision', 'parse', 'uncertain', 'rollback']) assert.equal(s.counts[k], 0, k);

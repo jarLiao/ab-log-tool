@@ -57,6 +57,7 @@ async function load(page,mode='raw'){
     ok('Returning to the anomaly restores its own observed change',(await page.locator('#fields').innerText()).includes('数值减小 328'));
     await page.locator('#eventRows tr').first().click();await expectSid(page,'0x2514 → 0xBB7B');
     await page.locator('#exportBtn').click();
+    await page.locator('#exportRange').selectOption('filtered');
     const csvWait=page.waitForEvent('download');await page.locator('#csvBtn').click();await (await csvWait).saveAs(path.join(out,'jumps.csv'));
     const csv=fs.readFileSync(path.join(out,'jumps.csv'),'utf8');
     const rows=csv.trim().replace(/^\uFEFF/,'').split('\r\n').map(line=>line.slice(1,-1).split('\",\"'));

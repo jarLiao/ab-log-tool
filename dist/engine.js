@@ -1,7 +1,7 @@
 /* AB framing, sequence analysis, comparison and exports. No network or DOM. */
 (function (root) {
   'use strict';
-  function createEngine() {
+  function createEngine(C) {
     const MOD = 65536, HALF = 32768, LEADING_BACKFILL_LIMIT = 4096;
     const BOUNDARY_MIN_RUN = 4, BOUNDARY_LOOKAHEAD = 8, BOUNDARY_MIN_CONFLICTS = 3;
     // Keep the legacy "rollback" ID for filters; a boundary does not prove direction.
@@ -9,7 +9,7 @@
       gap: '最终缺号', reorder: '乱序补到', duplicate: '重复记录',
       collision: '同号不同内容', parse: '解析 / 校验异常', uncertain: '序号跨度待核对', rollback: '序号跳变待核对',
       rawOnly: '仅原始日志有', filteredOnly: '仅过滤日志有',
-      pairOrder: '共有帧顺序差异', pairUncertain: '配对待核对', matched: '双方都有', record: '报文记录', logLine: '原始日志行'
+      pairOrder: '共有帧顺序差异', pairUncertain: '配对待核对', matched: '双方都有', record: '报文记录', logLine: '原始日志行', connection: '连接事件'
     };
     const crcTable = Uint16Array.from({length: 256}, (_, n) => {
       let c = n << 8;
@@ -43,6 +43,9 @@
       const lines = text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/);
       if (lines.at(-1) === '') lines.pop();
       const result = {name, side, lines, rows: [], events: [], diagnostics: 0, dataLines: 0, wraps: 0, segments: 0, maxLineLength: 0};
+      const connections=C.tracker(lines,side);
+      result.connectionEvents=[];result.skipRecords=[];result.connectionGroups=connections.groups;
+      result.orderedSessions=connections.ordered;
       let buf = new Uint8Array(131088), begin = 0, end = 0, absolute = 0;
       let marks = [], markCursor = 0, noiseStart = -1, noiseEnd = -1, noiseCount = 0;
       const word = p => buf[p] | (buf[p + 1] << 8);
@@ -105,7 +108,7 @@
           const high = locate(absolute + begin + 7);
           const highLine = high.line, highOffset = absolute + begin + 7 - high.start;
           const b = locate(absolute + finish - 1);
-          result.rows.push({index: result.rows.length, line: a.line, endLine: b.line, t: a.t,
+          result.rows.push({index: result.rows.length, line: a.line, endLine: b.line, t: a.t, connectionKey:a.connectionKey,
             sid: word(begin + 6), props: buf[begin + 1], cmd: bodyLength ? buf[begin + 8] : null,
             key: bodyLength >= 3 ? buf[begin + 10] : null, bodyLength,
             seqLowLine: lowLine, seqLowOffset: lowOffset, seqHighLine: highLine, seqHighOffset: highOffset,
@@ -124,7 +127,7 @@
           const bigger = new Uint8Array(Math.max(buf.length * 2, end + bytes.length));
           bigger.set(buf.subarray(0, end)); buf = bigger;
         }
-        marks.push({start: absolute + end, end: absolute + end + bytes.length, line, t});
+        marks.push({start: absolute + end, end: absolute + end + bytes.length, line, t, connectionKey:connections.data().key});
         buf.set(bytes, end); end += bytes.length;
         drain();
       }
@@ -132,6 +135,21 @@
         result.maxLineLength = Math.max(result.maxLineLength, lines[i].length);
         const s = lines[i].trim();
         if (s) {
+          const diagnostic=C.read(s,i+1,side);
+          if(diagnostic){
+            result.diagnostics++;
+            if(diagnostic.skip)result.skipRecords.push(diagnostic);
+            if(diagnostic.kind){
+              if(connections.accept(diagnostic))drain(true);
+              if(diagnostic.event==='error'&&!diagnostic.structured){
+                const code=/Error on connection state change\s*\((-?\d+)\)/.exec(lines[i+1]||'');
+                if(code){diagnostic.status=Number(code[1]);diagnostic.endLine=i+2;}
+              }
+              result.connectionEvents.push(diagnostic);
+            }
+            if(i%2048===0)progress(i/Math.max(1,lines.length),'识别连接事件');
+            continue;
+          }
           const match = /^(\d{10,16})\s*[,，]\s*(.*)$/.exec(s);
           if (!match) result.diagnostics++;
           else {
@@ -151,15 +169,21 @@
         if (i % 2048 === 0) progress(i / Math.max(1, lines.length), '识别报文');
       }
       drain(true);
+      C.decorate(result);
       analyzeSequence(result, progress);
       const rows = result.rows;
       let minTime = Infinity, maxTime = -Infinity;
       for (const row of rows) { minTime = Math.min(minTime, row.t); maxTime = Math.max(maxTime, row.t); }
       result.minTime = rows.length ? minTime : null; result.maxTime = rows.length ? maxTime : null;
+      finalize(result);
+      return result;
+    }
+    function finalize(result) {
+      const rows=result.rows,side=result.side;
       result.counts = {frames: rows.length, gap: 0, gapRanges: 0, reorder: 0, duplicate: 0, collision: 0, parse: 0, uncertain: 0, rollback: 0};
       result.events.sort((a, b) => a.line - b.line || a.endLine - b.endLine || a.kind.localeCompare(b.kind));
       result.events.forEach((e, i) => {
-        e.id = (side === 'raw' ? 'R' : 'F') + String(i + 1).padStart(5, '0');
+        e.id = (side === 'raw' ? 'R' : side==='filtered'?'F':'D') + String(i + 1).padStart(5, '0');
         if (e.kind === 'gap') { result.counts.gap += e.count; result.counts.gapRanges++; }
         else result.counts[e.kind]++;
         if (e.index == null) {
@@ -168,8 +192,9 @@
           while (lo < hi) { const m = (lo + hi) >>> 1; if (rows[m].line < e.line) lo = m + 1; else hi = m; }
           e.index = Math.min(rows.length - 1, lo);
         }
+        const row=rows[e.index];
+        if(row&&e.kind!=='parse'){e.connectionKey=row.connectionKey;e.connection=row.connection;e.appConnection=row.appConnection;e.connectionEvidence=row.connectionEvidence;}
       });
-      return result;
     }
     function analyzeSequence(s, progress) {
       const rows = s.rows, events = s.events;
@@ -179,7 +204,7 @@
       // IDs with new content are not evidence that missing frames have arrived late.
       const forwardRuns = new Uint32Array(rows.length);
       for (let i = rows.length - 1; i >= 0; i--) forwardRuns[i] = 1 +
-        (i + 1 < rows.length && mod(rows[i + 1].sid - rows[i].sid) === 1 ? forwardRuns[i + 1] : 0);
+        (i + 1 < rows.length && rows[i+1].connectionKey===rows[i].connectionKey && mod(rows[i + 1].sid - rows[i].sid) === 1 ? forwardRuns[i + 1] : 0);
       function boundaryEvidence(i, ext) {
         if (!i || ext >= high || mod(rows[i].sid - rows[i - 1].sid) <= HALF || forwardRuns[i] < BOUNDARY_MIN_RUN) return null;
         let conflicts = 0;
@@ -215,19 +240,26 @@
         if (ordered.length) s.segmentRanges.push({segment, firstIndex: segmentStart, lastIndex: endIndex,
           firstLine: rows[segmentStart].line, lastLine: rows[endIndex].endLine,
           firstSid: rows[segmentStart].sid, lastSid: rows[endIndex].sid,
-          frames: endIndex - segmentStart + 1, gap: missing, gapRanges});
+          frames: endIndex - segmentStart + 1, gap: missing, gapRanges,
+          connectionKey:rows[segmentStart].connectionKey,connection:rows[segmentStart].connection,
+          evidence:rows[segmentStart].connectionEvidence,boundaryKind:rows[segmentStart].boundaryKind});
       }
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         if (i === 0) { low = high = r.sid; highRow = r; segment++; }
+        const connectionBoundary=i>0&&r.connectionKey!==rows[i-1].connectionKey;
+        if(connectionBoundary){
+          finishSegment(i-1);seen=new Map();variants=new Map();low=high=r.sid;highRow=r;segment++;segmentStart=i;
+          r.boundaryKind=r.connectionEvidence==='未关联'||rows[i-1].connectionEvidence==='未关联'?'attribution':'connection';
+        }
         let ext = Math.floor(high / MOD) * MOD + r.sid;
         if (ext - high > HALF) ext -= MOD;
         else if (high - ext > HALF) ext += MOD;
         // Short late arrivals can precede the first logged frame. Expand the observed span
         // so a frame already present at the beginning never becomes a spurious final gap.
         // A large backwards extension has no prior-cycle anchor; leave that span unresolved.
-        const boundary = boundaryEvidence(i, ext);
-        const ambiguous = i && (Math.abs(ext - high) === HALF || ext < low - LEADING_BACKFILL_LIMIT);
+        const boundary = !connectionBoundary&&boundaryEvidence(i, ext);
+        const ambiguous = !connectionBoundary&&i && (Math.abs(ext - high) === HALF || ext < low - LEADING_BACKFILL_LIMIT);
         if (boundary || ambiguous) {
           finishSegment(i - 1);
           const p = rows[i - 1], kind = boundary ? 'rollback' : 'uncertain';
@@ -279,6 +311,7 @@
       s.segments = segment;
     }
     function compare(raw, filtered, progress = () => {}) {
+      associateFiltered(raw,filtered);
       const buckets = new Map(), counts = new Map(), events = [], matches = [];
       const rRows = raw.rows, fRows = filtered.rows;
       const key = r => r.t + '|' + r.hex;
@@ -296,12 +329,14 @@
       function make(kind, side, r, extra = {}) {
         return {kind, source: side, index: r.index, line: r.line, endLine: r.endLine, t: r.t,
           sid: r.sid, cmd: r.cmd, key: r.key, cycle: r.cycle, segment: r.segment,
+          connectionKey:r.connectionKey,connection:r.connection,appConnection:r.appConnection,connectionEvidence:r.connectionEvidence,
           coverage: coverage(r), ...extra};
       }
       const used = new Uint8Array(fRows.length), ambiguousKeys = new Set();
       let highestFiltered = -1, previous = null;
       for (let i = 0; i < rRows.length; i++) {
         const r = rRows[i], k = key(r), bucket = buckets.get(k);
+        if(i&&r.connectionKey!==rRows[i-1].connectionKey){highestFiltered=-1;previous=null;}
         if (!bucket || bucket.used >= bucket.items.length) {
           events.push(make('rawOnly', 'raw', r, {reason: '过滤日志中没有剩余的同时间戳、同完整帧记录可配对。不推测原因。'}));
         } else {
@@ -333,15 +368,50 @@
         stats[e.kind]++;
         if (e.kind === 'rawOnly' || e.kind === 'filteredOnly') stats[e.coverage]++;
       }
-      return {events, matches, counts: stats, overlap, minTime: overlap ? lo : null, maxTime: overlap ? hi : null};
+      const skips=new Map(),skipTargets=new Map();
+      for(const r of rRows){const k=r.t+'|'+r.sid;skipTargets.set(k,(skipTargets.get(k)||0)+1);}
+      for(const e of raw.skipRecords){const k=e.t+'|'+e.to;const list=skips.get(k)||[];list.push(e);skips.set(k,list);}
+      for(const e of events)if(e.kind==='rawOnly'){
+        const candidates=skips.get(e.t+'|'+e.sid)||[];
+        if(candidates.length===1&&candidates[0].reason==='backward_dup'&&skipTargets.get(e.t+'|'+e.sid)===1){
+          e.skipLine=candidates[0].line;e.skipReason=candidates[0].reason;
+          e.reason+=' 原始日志 L'+e.skipLine+' 记录相同接收时间戳和序号的 reorder_skip（backward_dup）；这是过滤决策记录，不代表蓝牙丢包。';
+        }
+      }
+      const sessions=new Map();
+      for(const e of [...matches,...events.filter(e=>['rawOnly','filteredOnly'].includes(e.kind))]){
+        const k=e.connectionEvidence==='未关联'?'unknown':e.connectionKey||'unknown';let row=sessions.get(k);
+        if(!row){row={key:k,connection:e.connection||'连接归属待核对',connectionSource:k==='unknown'?'':k.split(':')[0],matched:0,rawOnly:0,filteredOnly:0,skip:0};sessions.set(k,row);}
+        row[e.kind]++;if(e.skipLine)row.skip++;
+      }
+      return {events, matches, sessions:[...sessions.values()], counts: stats, overlap, minTime: overlap ? lo : null, maxTime: overlap ? hi : null};
+    }
+    function associateFiltered(raw,filtered){
+      if(filtered.connectionEvents.some(e=>e.ordered||['disconnected','link_loss','process_start'].includes(e.event))||raw.connectionCount<2)return;
+      const anchors=new Map(),occurrences=new Map();
+      for(const r of raw.rows){const k=r.t+'|'+r.hex;anchors.set(k,anchors.has(k)?null:r);}
+      for(const r of filtered.rows){const k=r.t+'|'+r.hex;occurrences.set(k,(occurrences.get(k)||0)+1);}
+      let unknown=0,run=0,previous='';
+      filtered.connectionGroups=raw.connectionGroups.map(g=>({...g,evidence:'同时间戳与完整帧的唯一配对锚点'}));
+      for(const r of filtered.rows){
+        const k=r.t+'|'+r.hex,a=occurrences.get(k)===1?anchors.get(k):null;
+        if(a)r.connectionKey=a.connectionKey;
+        else {if(previous!=='unknown')run++;r.connectionKey='filtered:unknown'+run;unknown++;}
+        previous=a?'known':'unknown';
+        delete r.wrap;delete r.boundaryKind;
+      }
+      filtered.associationNote='按唯一的接收时间戳与完整帧关联原始日志会话。'+(unknown?'有 '+unknown+' 条报文无法唯一关联，单独统计；跨归属边界不补缺号。':'');
+      C.decorate(filtered);filtered.events=filtered.events.filter(e=>e.kind==='parse');filtered.wraps=0;
+      analyzeSequence(filtered,()=>{});finalize(filtered);
     }
     function summary(s) {
       return {name: s.name, side: s.side, bytes: s.bytes, encoding: s.encoding, counts: s.counts,
         lineCount: s.lines.length, maxLineLength: s.maxLineLength, diagnostics: s.diagnostics, dataLines: s.dataLines,
         minTime: s.minTime, maxTime: s.maxTime, firstSid: s.rows[0]?.sid ?? null, lastSid: s.rows.at(-1)?.sid ?? null,
-        wraps: s.wraps, segments: s.segments, segmentRanges: s.segmentRanges};
+        wraps: s.wraps, segments: s.segments, segmentRanges: s.segmentRanges,connectionCount:s.connectionCount,
+        connectionEvents:s.connectionEvents.length,associationNote:s.associationNote,unassociatedRanges:s.unassociatedRanges};
     }
-    function title(e) { return names[e.kind] || e.kind; }
+    function title(e) { return e.kind==='connection'?(C.labels[e.event]||e.event):names[e.kind] || e.kind; }
     function label(e) { return e.previousSid != null ? e.previousSid + ' → ' + e.sid : e.kind === 'gap' ? e.from === e.to ? String(e.from) : e.from + '–' + e.to : e.sid == null ? '—' : String(e.sid); }
     function hexLabel(e) { return e.previousSid != null ? hexWord(e.previousSid) + ' → ' + hexWord(e.sid) : e.kind === 'gap' ? e.from === e.to ? hexWord(e.from) : hexWord(e.from) + '–' + hexWord(e.to) : hexWord(e.sid) || '—'; }
     function dualLabel(e) { return hexLabel(e) + '（DEC ' + label(e) + '）'; }
@@ -352,20 +422,21 @@
       return text;
     }
     function selectEvents(data, mode, filter = {}) {
-      const all = mode === 'pair' ? filter.kind === 'matched' ? data.pair.matches : data.pair.events : data[mode].events;
+      const all = mode === 'pair' ? filter.kind === 'matched' ? data.pair.matches : data.pair.events : data[mode]?.events||[];
       if (!filter.query && (!filter.kind || filter.kind === 'all' || filter.kind === 'matched') &&
-          !filter.command && !filter.from && !filter.to && (!filter.coverage || filter.coverage === 'all')) return all;
+          !filter.command && !filter.from && !filter.to && !filter.connection && (!filter.coverage || filter.coverage === 'all')) return all;
       const q = (filter.query || '').toLowerCase().trim();
       const numeric = /^(?:0x[\da-f]+|\d+)$/i.test(q) ? Number(q) : null;
       const cmd = filter.command === '' || filter.command == null ? null : Number(filter.command);
       return all.filter(e => {
-        if (filter.kind && !['all', 'matched'].includes(filter.kind) && e.kind !== filter.kind) return false;
+        if (filter.kind && !['all', 'matched'].includes(filter.kind) && e.kind !== filter.kind && e.event!==filter.kind) return false;
+        if(filter.connection&&(filter.connection==='unknown'?e.connectionEvidence!=='未关联':e.connectionKey!==filter.connection))return false;
         if (cmd != null && e.cmd !== cmd) return false;
         if (filter.from && (e.t == null || e.t < Number(filter.from))) return false;
         if (filter.to && (e.t == null || e.t > Number(filter.to))) return false;
         if (filter.coverage && filter.coverage !== 'all' && e.coverage !== filter.coverage) return false;
         return !q || (numeric != null && (e.sid === numeric || e.previousSid === numeric || e.kind === 'gap' && numeric >= e.from && numeric <= e.to)) ||
-          [e.id, title(e), label(e), 'L' + e.line, 'L' + e.endLine, timestamp(e.t), hexByte(e.cmd), hexByte(e.key), data[e.source].name]
+          [e.id, title(e), label(e),e.connection,e.appConnection,e.event,e.status,e.reason,'L' + e.line, 'L' + e.endLine, timestamp(e.t), hexByte(e.cmd), hexByte(e.key), data[e.source].name]
             .some(v => String(v).toLowerCase().includes(q));
       });
     }
@@ -393,10 +464,11 @@
       if (!previous) return {ms: null, previous: null, label: '—（首包）', hint: '本日志的第一条有效报文，没有上包。'};
       const ms = Number.isSafeInteger(row.t) && Number.isSafeInteger(previous.t) ? row.t - previous.t : null;
       const acrossSegment = previous.segment !== row.segment;
-      return {ms, previous: {index: previous.index, line: previous.line, endLine: previous.endLine, sid: previous.sid, t: previous.t}, acrossSegment,
+      const acrossConnection=previous.connectionKey!==row.connectionKey;
+      return {ms, previous: {index: previous.index, line: previous.line, endLine: previous.endLine, sid: previous.sid, t: previous.t}, acrossSegment,acrossConnection,
         label: ms == null ? '—（时间戳不可用）' : ms + ' ms' + (Math.abs(ms) >= 1000 ? '（' + (ms / 1000).toFixed(3) + ' s）' : ''),
         hint: (ms == null ? '无法可靠计算时间差。' : ms < 0 ? '时间戳回退，保留原始负值。' : ms === 0 ? '两包使用相同的接收时间戳。' : '当前接收时间减去上一有效报文的接收时间。') +
-          (acrossSegment ? '跨分析段，仅表示日志接收时间差。' : '')};
+          (acrossConnection?'跨连接 / 归属边界，仅表示日志接收时间差，不计为同一连接收包停顿。':acrossSegment ? '跨分析段，仅表示日志接收时间差。' : '')};
     }
     function timingText(timing) {
       return timing ? '与上包间隔：' + timing.label + (timing.previous ? '；上包 ' + hexWord(timing.previous.sid) + ' / L' + timing.previous.line : '') + '。' + timing.hint : '';
@@ -405,6 +477,7 @@
       if (!row) return null;
       return {index: row.index, line: row.line, endLine: row.endLine, total: s.rows.length, sid: row.sid, sidHex: hexWord(row.sid), seqBytes: sequenceBytes(row.sid),
         cmd: hexByte(row.cmd), key: hexByte(row.key), cycle: row.cycle, segment: row.segment, timing: packetTiming(s, row),
+        connection:row.connection,connectionKey:row.connectionKey,appConnection:row.appConnection,connectionEvidence:row.connectionEvidence,
         length: row.bodyLength + 8, t: timestamp(row.t), hex: row.hex.slice(0, 512), truncated: row.hex.length > 512,
         header: row.hex.slice(0, 16).toUpperCase().match(/../g), anchors: sequenceSource(s, row)};
     }
@@ -439,6 +512,8 @@
       if (e.relatedSource) add(e.relatedSource, e.relatedLine, e.relatedEndLine,
         e.kind === 'gap' ? '缺号范围之前的报文' : '关联记录', data[e.relatedSource].rows[e.relatedIndex]);
       if (e.anchorSource) { const r = data[e.anchorSource].rows[e.anchorIndex]; add(e.anchorSource, r.line, r.endLine, '顺序参照帧', r); }
+      if(e.skipLine)add('raw',e.skipLine,e.skipLine,'过滤决策证据',null);
+      for(const ref of e.refs||[])if(ref.source!==e.source||ref.line!==e.line)add(ref.source,ref.line,ref.endLine,'同一事件的另一处原文',null);
       return {event: e, description: descriptions(e, data), sections, frame: sections[0].frame};
     }
     function framesAtLine(s, line) {
@@ -458,9 +533,11 @@
       let line = Math.max(1, Math.min(s.lines.length, Number(selection.line) || row?.line || 1));
       const candidates = framesAtLine(s, line);
       if (!row || row.line > line || row.endLine < line || !candidates.includes(row)) row = candidates[0];
-      const e = {kind: row ? 'record' : 'logLine', id: row ? 'B' + (s.side === 'raw' ? 'R' : 'F') + String(row.index + 1).padStart(6, '0') : 'L' + line,
+      const connectionEvent=!row&&(data.connections?.events||[]).find(e=>e.refs?.some(ref=>ref.source===s.side&&line>=ref.line&&line<=ref.endLine));
+      const e = connectionEvent ? {...connectionEvent,source:s.side,line,endLine:line,index:null} : {kind: row ? 'record' : 'logLine', id: row ? 'B' + (s.side === 'raw' ? 'R' : 'F') + String(row.index + 1).padStart(6, '0') : 'L' + line,
         source: s.side, index: row?.index, line: row?.line || line, endLine: row?.endLine || line,
         t: row?.t ?? null, sid: row?.sid, cmd: row?.cmd, key: row?.key, segment: row?.segment, cycle: row?.cycle,
+        connection:row?.connection,connectionKey:row?.connectionKey,appConnection:row?.appConnection,
         reason: row ? '第 ' + (row.index + 1) + ' / ' + s.rows.length + ' 条有效报文，CRC16 校验通过。浏览报文不改变异常统计。' :
           '该行没有对应的完整有效报文。保留原文，清空序号、命令 / Key 等解析字段。'};
       const d = detail(data, e);
@@ -475,7 +552,7 @@
         lines: s.lines.slice(start - 1, start - 1 + length).map((text, i) => ({n: start + i, text}))};
     }
     function chart(data, mode, filter, opts = {}) {
-      const side = mode === 'pair' ? opts.side || 'raw' : mode, s = data[side], rows = s.rows;
+      const side = mode === 'pair' ? opts.side || 'raw' : mode, s = data[side], rows = s?.rows||[];
       if (!rows.length) return {points: [], markers: [], total: 0, side, lo: 0, hi: 0};
       const lo = Math.max(0, Math.min(rows.length - 1, opts.lo || 0));
       const hi = Math.max(lo, Math.min(rows.length - 1, opts.hi ?? rows.length - 1));
@@ -489,7 +566,7 @@
         }
         for (const j of [...new Set([a, mn, mx, b])].sort((x, y) => x - y)) {
           const r = rows[j];
-          points.push({index: j, sid: r.sid, line: r.line, t: r.t, cmd: r.cmd, key: r.key, segment: r.segment, cycle: r.cycle, timing: packetTiming(s, r)});
+          points.push({index: j, sid: r.sid, line: r.line, t: r.t, cmd: r.cmd, key: r.key, segment: r.segment, cycle: r.cycle, connection:r.connection,timing: packetTiming(s, r)});
         }
       }
       const grouped = new Map();
@@ -505,10 +582,11 @@
       }
       const wraps = [];
       for (let i = lo; i <= hi; i++) if (rows[i].wrap || i > 0 && rows[i].segment !== rows[i - 1].segment) wraps.push({
-        index: i, sid: rows[i].sid, label: rows[i].wrap ? '正常回绕' : rows[i].boundaryKind === 'rollback' ? '序号跳变 · 待核对分段' : '待核对分段'});
+        index: i, sid: rows[i].sid, label: rows[i].wrap ? '正常回绕' : rows[i].boundaryKind==='attribution'?'连接归属变化 · 待核对':rows[i].boundaryKind==='connection'?'连接边界 · '+rows[i].connection:rows[i].boundaryKind === 'rollback' ? '序号跳变 · 待核对分段' : '待核对分段'});
       return {points, markers: [...grouped.values()], wraps, total: rows.length, side, lo, hi};
     }
     function exportParts(data, events, type, scope = '全部结果') {
+      const statisticsScope=s=>s.counts.rollback||s.counts.uncertain?'按段统计；段间待核对':s.unassociatedRanges?'按连接归属范围统计；未关联报文待核对':s.connectionCount>1?'按连接统计；跨连接不比较序号':'单段统计';
       const cell = value => {
         let s = String(value ?? '');
         // Spreadsheet-safe for untrusted filenames and text beginning with a formula prefix.
@@ -519,7 +597,8 @@
         const out = ['\uFEFF' + ['异常编号', '记录类型', '来源文件', '起始行', '结束行', '关联文件', '关联起始行', '关联结束行',
           '接收时间', '毫秒时间戳', '消息序号', '命令', 'Key', '可分析段', '序号周期', '缺号起始', '缺号结束', '缺号数量', '覆盖范围', '说明', '导出范围',
           '消息序号HEX', '序号原始字节LE', '缺号起始HEX', '缺号结束HEX', '前一报文序号', '前一报文序号HEX', '序号数值变化', '统计口径',
-          '判定提示', '候选向前跨度', '候选向后跨度', '距上包间隔ms', '上包序号HEX', '上包起始行', '上包接收时间', '间隔说明'].map(cell).join(',') + '\r\n'];
+          '判定提示', '候选向前跨度', '候选向后跨度', '距上包间隔ms', '上包序号HEX', '上包起始行', '上包接收时间', '间隔说明',
+          '连接会话','连接编号','连接归属依据','连接事件','状态码','重试等待ms','过滤决策原文行','连接事件原文位置'].map(cell).join(',') + '\r\n'];
         let chunk = '';
         for (const e of events) {
           const timing = packetTiming(data[e.source], ['parse', 'logLine'].includes(e.kind) ? null : data[e.source].rows[e.index]);
@@ -528,9 +607,10 @@
             e.from, e.to, e.count, e.coverage === 'inside' ? '共有范围内' : e.coverage === 'outside' ? '共有范围外' : e.coverage === 'unknown' ? '无共有范围' : '',
             descriptions(e, data), scope, hexWord(e.sid), sequenceBytes(e.sid), hexWord(e.from), hexWord(e.to),
             e.previousSid, hexWord(e.previousSid), e.numericDelta,
-            data[e.source].segments > 1 ? '按段统计；段间待核对' : '单段统计', e.directionHint,
+            statisticsScope(data[e.source]), e.directionHint,
             e.forwardDistance, e.backwardDistance, timing?.ms, hexWord(timing?.previous?.sid), timing?.previous?.line,
-            timestamp(timing?.previous?.t), timing?.hint].map(cell).join(',') + '\r\n';
+            timestamp(timing?.previous?.t), timing?.hint,e.connection,e.appConnection,e.connectionEvidence||e.group?.evidence,
+            e.event,e.status,e.fields?.delay_ms,e.skipLine,(e.refs||[]).map(r=>data[r.source].name+':L'+r.line+(r.endLine!==r.line?'–L'+r.endLine:'')).join('；')].map(cell).join(',') + '\r\n';
           if (chunk.length > 262144) { out.push(chunk); chunk = ''; }
         }
         if (chunk) out.push(chunk);
@@ -539,12 +619,14 @@
       const out = ['AB 日志分析 · 原始片段\r\n导出范围：' + scope + '；记录数：' + events.length +
         '\r\n序号按完整文件、源行顺序计算；缺号不直接等于通信丢包。\r\n' +
         Object.values(data).filter(s => s.rows).map(s => s.name + '：' + s.segments + ' 个可分析段；' +
-          (s.segments > 1 ? '仅统计段内缺号，段间待核对，缺号为 0 不代表整份日志完整。' : '单段统计。')).join('\r\n') + '\r\n\r\n'];
+          statisticsScope(s)+'；'+(s.segments > 1 ? '仅统计段内缺号，缺号为 0 不代表整份日志完整。' : '不推测文件首尾以外的序号。')).join('\r\n') + '\r\n\r\n'];
       let chunk = '';
       for (const e of events) {
-        chunk += '[' + e.id + '] ' + title(e) + ' ' + dualLabel(e) + '\r\n' + descriptions(e, data) + '\r\n';
+        chunk += '[' + e.id + '] ' + title(e) + ' ' + (e.kind==='connection'?'':dualLabel(e)) + '\r\n' + descriptions(e, data) + '\r\n连接会话：'+(e.connection||'待核对')+'\r\n';
         const spans = [[e.source, e.line, e.endLine, e.kind === 'parse' ? null : e.index]];
         if (e.relatedSource) spans.push([e.relatedSource, e.relatedLine, e.relatedEndLine, e.relatedIndex]);
+        if(e.skipLine)spans.push(['raw',e.skipLine,e.skipLine,null]);
+        for(const ref of e.refs||[])if(ref.source!==e.source||ref.line!==e.line)spans.push([ref.source,ref.line,ref.endLine,null]);
         if (e.anchorSource) { const r = data[e.anchorSource].rows[e.anchorIndex]; spans.push([e.anchorSource, r.line, r.endLine, r.index]); }
         for (const [side, start, end, index] of spans) {
           const s = data[side];
@@ -565,9 +647,9 @@
       if (chunk) out.push(chunk);
       return out;
     }
-    return {parse, compare, summary, crc16, makeFrame, names, title, label, timestamp,
+    return {parse, compare, summary, crc16, makeFrame, names, title, label, timestamp,connections:C.timeline,connectionLabels:C.labels,
       selectEvents, detail, inspect, framesAtLine, logWindow, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource, packetTiming, timingText};
   }
-  if (typeof module !== 'undefined' && module.exports) module.exports = createEngine();
-  else { root.ABEngineFactory = createEngine; root.ABEngine = createEngine(); }
+  if (typeof module !== 'undefined' && module.exports) module.exports = createEngine(require('./connections.js'));
+  else { root.ABEngineFactory = createEngine; root.ABEngine = createEngine(root.ABConnections); }
 })(typeof globalThis === 'undefined' ? self : globalThis);

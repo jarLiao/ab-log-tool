@@ -17,7 +17,7 @@ function abWorkerMain() {
   function eventById(id) {
     if (!id) return null;
     const index = Number(id.slice(1)) - 1;
-    const arr = id[0] === 'R' ? data.raw?.events : id[0] === 'F' ? data.filtered?.events :
+    const arr = id[0]==='T'?data.connections?.events:id[0]==='D'?data.connection?.events:id[0] === 'R' ? data.raw?.events : id[0] === 'F' ? data.filtered?.events :
       id[0] === 'M' ? data.pair?.matches : data.pair?.events;
     return arr?.[index] || null;
   }
@@ -57,6 +57,7 @@ function abWorkerMain() {
           data[side] = s;
         }
         if (data.raw && data.filtered) data.pair = E.compare(data.raw, data.filtered, (p, stage) => sendProgress(78 + p * 20, stage));
+        data.connections=E.connections(data);
         sendProgress(100, '分析完成');
         const meta = {};
         for (const side of sides) {
@@ -64,7 +65,10 @@ function abWorkerMain() {
           meta[side].elapsed = data[side].elapsed;
           meta[side].commands = [...new Set(data[side].rows.map(r => r.cmd).filter(n => n != null))].sort((a, b) => a - b);
         }
-        if (data.pair) meta.pair = {counts: data.pair.counts, overlap: data.pair.overlap, minTime: data.pair.minTime, maxTime: data.pair.maxTime};
+        if (data.pair) meta.pair = {counts: data.pair.counts, sessions:data.pair.sessions, overlap: data.pair.overlap, minTime: data.pair.minTime, maxTime: data.pair.maxTime};
+        meta.connections={counts:data.connections.counts,warnings:data.connections.warnings,recovery:data.connections.recovery,
+          kinds:[...new Set(data.connections.events.map(e=>e.event))],
+          groups:[...new Map(data.connections.events.map(e=>[e.connectionKey,{key:e.connectionKey,label:e.connection}])).values()]};
         self.postMessage({id, type: 'loaded', meta, fingerprints});
       } else if (type === 'view') {
         const events = getEvents(msg.mode, msg.filter);
@@ -79,8 +83,8 @@ function abWorkerMain() {
           selectedIndex = page * pageSize; selected = events[selectedIndex] || null;
         }
         let inspection = msg.inspection ? E.inspect(data, msg.inspection) : null;
-        const defaultSide = msg.mode === 'filtered' ? 'filtered' : msg.chart?.side || 'raw';
-        if (!selected && !inspection && !events.length && msg.filter?.kind === 'all' && !msg.filter.query && !msg.filter.command && !msg.filter.from && !msg.filter.to && data[defaultSide]?.lines.length) {
+        const defaultSide = msg.mode==='connections'?(data.connection?'connection':data.raw?'raw':'filtered'):msg.mode === 'filtered' ? 'filtered' : msg.chart?.side || 'raw';
+        if (!selected && !inspection && !events.length && msg.filter?.kind === 'all' && !msg.filter.query && !msg.filter.command && !msg.filter.connection && !msg.filter.from && !msg.filter.to && data[defaultSide]?.lines.length) {
           inspection = E.inspect(data, {source: defaultSide, index: 0});
         }
         let chartOptions = msg.chart || {};
@@ -100,8 +104,8 @@ function abWorkerMain() {
         self.postMessage({id, type, ...E.logWindow(data[msg.source], msg.first, msg.count)});
       } else if (type === 'export') {
         const events = msg.scope === 'filtered' ? getEvents(msg.mode, msg.filter) :
-          [...(data.raw?.events || []), ...(data.filtered?.events || []), ...(data.pair?.events || [])];
-        const scope = msg.scope === 'filtered' ? '当前视图与筛选' : '全部文件异常与配对差异';
+          [...(data.raw?.events || []), ...(data.filtered?.events || []), ...(data.pair?.events || []),...(data.connection?.events||[]),...data.connections.events];
+        const scope = msg.scope === 'filtered' ? '当前视图与筛选' : '全部文件异常、配对差异与连接事件';
         const parts = E.exportParts(data, events, msg.format, scope);
         self.postMessage({id, type: 'export', format: msg.format, count: events.length,
           blob: new Blob(parts, {type: msg.format === 'csv' ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8'})});

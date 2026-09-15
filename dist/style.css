@@ -230,4 +230,15 @@ progress{width:100%;height:10px;accent-color:var(--blue);display:block;margin:25
 .history-item-actions{display:flex;gap:8px;flex:none}
 .history-empty{padding:24px 0;color:var(--muted);text-align:center}
 .packet-timing{font-size:12px;color:#d4e2f5;padding-top:10px;border-top:1px solid #40546b;margin-top:9px;overflow-wrap:anywhere}
+.connection-import{margin:14px 0;display:grid;gap:8px}.connection-import .dropzone{min-height:120px;padding:16px}.connection-import>.button{justify-self:end;min-height:44px}
+.import-types{flex-wrap:wrap}.import-types .button{min-height:44px}
+.connection-guide{padding:18px}.connection-guide>p{margin:8px 0;color:var(--muted);max-width:100ch}
+.recovery-item{display:grid;gap:4px;border-left:3px solid var(--teal);padding:10px 14px;margin-top:12px;background:#f0f8f7}.recovery-item span{color:var(--muted);font-size:12px}
+.segment-connection{display:block;white-space:normal;overflow-wrap:anywhere;color:var(--muted);font-size:12px;margin-top:5px}
+.tag.connection{background:#e7f5f2;color:#076a61}.timeline-select{background:transparent;border:0;min-height:44px;text-align:left;padding:0 4px;max-width:160px}.timeline-select .tag{white-space:normal}
+.chart-boundary{cursor:pointer}.chart-boundary:focus-visible{outline:none}.chart-boundary:focus-visible>rect{stroke:var(--blue);stroke-width:2}
+#connectionFilter{max-width:320px;min-height:44px}#pairSessions td{font-variant-numeric:tabular-nums}#pairSessions th,#pairSessions td{padding:10px 14px}
+.timeline-time{white-space:normal}
+@media(max-width:650px){.connection-view .stats{grid-template-columns:repeat(2,minmax(0,1fr))}.connection-view .result-table{table-layout:fixed}.connection-view .result-table th:nth-child(1){width:27%}.connection-view .result-table th:nth-child(2){width:35%}.connection-view .result-table th:nth-child(3){width:14%;white-space:normal}.connection-view .result-table th:nth-child(4){width:24%}.timeline-time>span,.timeline-source{display:block}.connection-view .result-table td{white-space:normal;overflow-wrap:anywhere}.connection-view .timeline-select{width:100%;padding:0;min-width:44px}}
+@media(max-width:650px){.nav{flex-wrap:wrap}.navbtn{width:calc(50% - 3px);flex:auto}.timeline-select{max-width:105px}.connection-guide{padding:13px}.import-types .button{flex:1 1 42%}#connectionFilter{max-width:230px}}
 @media(max-width:650px){.topbar{flex-wrap:wrap}.history-item{align-items:stretch;flex-direction:column;gap:12px}.history-item-actions{justify-content:flex-end}.history-search{flex-basis:100%}.history-toolbar .button{flex:1}.history-list{max-height:42vh}.remember-option{font-size:13px}}

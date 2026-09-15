@@ -8,11 +8,12 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob:; script-src 'self'; worker-src blob:; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>AB 日志分析</title>
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./style.css?v=1.4.0">
-  <script src="./engine.js?v=1.4.0" defer></script>
-  <script src="./worker.js?v=1.4.0" defer></script>
-  <script src="./history.js?v=1.4.0" defer></script>
-  <script src="./app.js?v=1.4.0" defer></script>
+  <link rel="stylesheet" href="./style.css?v=1.5.0">
+  <script src="./connections.js?v=1.5.0" defer></script>
+  <script src="./engine.js?v=1.5.0" defer></script>
+  <script src="./worker.js?v=1.5.0" defer></script>
+  <script src="./history.js?v=1.5.0" defer></script>
+  <script src="./app.js?v=1.5.0" defer></script>
 </head>
 <body>
 <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -34,9 +35,10 @@
       <button class="navbtn active" data-mode="raw" disabled><svg class="ico"><use href="#i-file"/></svg>原始接收<span id="rawCount" class="count">—</span></button>
       <button class="navbtn" data-mode="filtered" disabled><svg class="ico"><use href="#i-file"/></svg>过滤之后<span id="filteredCount" class="count">—</span></button>
       <button class="navbtn" data-mode="pair" disabled><svg class="ico"><use href="#i-compare"/></svg>配对比较</button>
+      <button class="navbtn" data-mode="connections" disabled><svg class="ico"><use href="#i-history"/></svg>连接时间线<span id="connectionCount" class="count">—</span></button>
     </nav>
-    <div id="sourceNote" class="file-note">导入一份日志独立分析，或导入同一次连接的两份日志进行比较。</div>
-    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.4.0 · 网页工具</span></div>
+    <div id="sourceNote" class="file-note">导入同一设备的日志，可附加连接诊断文件，按连接分段核对。</div>
+    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.5.0 · 网页工具</span></div>
   </aside>
   <main class="main">
     <header class="topbar">
@@ -49,27 +51,29 @@
       <p>导入 AndroidTool 的 abBle 或 abFilter 文件，查看缺号、乱序、重复，并定位原始报文。</p>
       <div class="welcome-actions"><button id="welcomeImport" class="button primary">选择日志文件</button><button id="demoBtn" class="button">体验演示</button></div>
       <div class="flow-hint"><span>1  导入日志</span><span>2  图表与异常联动查看</span><span>3  导出明细和原文</span></div>
-      <p class="subtle">支持单份或一组配对日志 · 全命令共用序号 · 同一次连续连接</p>
+      <p class="subtle">支持单份或一组配对日志 · 可附加连接诊断 · 按连接分段核对</p>
     </section>
     <div id="workspace" class="content" hidden>
       <div class="sessionbar"><div><h2 id="viewTitle"></h2><p id="fileDescription"></p></div><span id="sessionStatus" class="session-status"></span></div>
       <div class="archive-status"><span id="historySaveStatus" role="status"></span><button id="saveHistoryBtn" class="button compact" hidden>保存到本机历史</button></div>
       <div id="qualityNote" class="notice" role="status" aria-live="polite" hidden></div>
-      <details id="segmentSummary" class="segment-summary" hidden><summary id="segmentSummaryTitle">查看分析段</summary><div class="segment-table"><table><thead><tr><th>分析段</th><th>原文范围</th><th>序号起止（HEX，含正常回绕）</th><th>有效报文</th><th>段内缺号</th></tr></thead><tbody id="segmentRows"></tbody></table></div></details>
+      <details id="segmentSummary" class="segment-summary" hidden><summary id="segmentSummaryTitle">查看分析段</summary><div class="segment-table"><table><thead><tr><th>分析段 / 连接</th><th>原文范围</th><th>序号起止（HEX，含正常回绕）</th><th>有效报文</th><th>段内缺号</th></tr></thead><tbody id="segmentRows"></tbody></table></div></details>
       <section id="stats" class="stats" aria-label="分析统计"></section>
-      <section class="panel chart-panel" aria-label="序号变化图">
+      <details id="pairSessions" class="segment-summary" hidden><summary>按连接核对两份日志</summary><div class="segment-table"><table><thead><tr><th>连接会话</th><th>双方都有</th><th>仅原始有</th><th>仅过滤有</th><th>有过滤决策证据</th></tr></thead><tbody id="pairSessionRows"></tbody></table></div></details>
+      <section id="connectionGuide" class="panel connection-guide" hidden><h3>按事件时间查看连接过程</h3><p>链路已连接 → 连接已就绪 → 首次观察到有效报文。断开后可继续查看重试和恢复过程；点击事件定位原文。事件按日志时间展示，同一文件的源行保留真实记录顺序。</p><div id="recoverySummary"></div></section>
+      <section id="chartPanel" class="panel chart-panel" aria-label="序号变化图">
         <div class="panel-head"><div class="head-inline"><h3>序号变化</h3><span id="chartSubtitle" class="small"></span></div>
           <div class="chart-controls"><label class="base-control">序号显示<select id="sequenceBase" aria-label="序号显示进制"><option value="hex">HEX 优先</option><option value="dec">十进制优先</option></select></label><select id="chartSide" aria-label="图表日志来源" hidden><option value="raw">原始接收</option><option value="filtered">过滤之后</option></select><button id="zoomIn" class="button compact" aria-label="放大图表">＋</button><button id="zoomOut" class="button compact" aria-label="缩小图表">−</button><div class="segmented"><button id="focusBtn" class="active">异常附近</button><button id="fullBtn">查看全程</button></div></div>
         </div>
         <div class="chart-body"><svg id="chart" class="chart-svg" role="group" aria-label="按接收顺序展示序号；标记可点击，异常列表提供文字与键盘访问"></svg></div>
-        <div class="chart-legend"><div class="legend-items"><span>— 序号</span><span class="gap-text">△ 缺号</span><span class="rollback-text">○ 跳变待核对</span><span class="reorder-text">◇ 乱序</span><span class="duplicate-text">□ 重复</span><span class="collision-text">× 同号异内容</span><span>│ 正常回绕 / 待核对分段</span></div><span id="chartHint"></span></div>
+        <div class="chart-legend"><div class="legend-items"><span>— 序号</span><span class="gap-text">△ 缺号</span><span class="rollback-text">○ 跳变待核对</span><span class="reorder-text">◇ 乱序</span><span class="duplicate-text">□ 重复</span><span class="collision-text">× 同号异内容</span><span>│ 连接边界 / 正常回绕 / 待核对分段</span></div><span id="chartHint"></span></div>
         <div class="chart-range"><label for="chartPan">移动查看范围</label><input id="chartPan" type="range" min="0" max="1000" value="0" aria-label="移动图表查看范围"></div>
       </section>
       <div class="workbench">
         <section class="panel result-panel" aria-label="异常和差异列表">
           <div class="panel-head"><div class="head-inline"><h3 id="resultTitle">异常列表</h3><span id="resultCount" class="pill"></span></div><div class="actions"><button id="prevBtn" class="button compact" aria-label="上一条记录"><svg class="ico"><use href="#i-left"/></svg></button><button id="nextBtn" class="button compact" aria-label="下一条记录"><svg class="ico"><use href="#i-right"/></svg></button></div></div>
           <div class="result-toolbar"><label class="search"><svg class="ico"><use href="#i-search"/></svg><input id="search" type="search" aria-label="搜索序号、源行、时间或命令" placeholder="0x8404 / 33796 / L行号"></label><select id="kindFilter" aria-label="记录类型"></select><select id="commandFilter" aria-label="命令筛选"><option value="">全部命令</option></select><button id="moreFilter" class="button compact" aria-expanded="false">更多筛选</button></div>
-          <div id="extraFilters" class="extra-filters" hidden><label>起始时间<input id="timeFrom" type="datetime-local" step="0.001"></label><label>结束时间<input id="timeTo" type="datetime-local" step="0.001"></label><label id="coverageLabel" hidden>覆盖范围<select id="coverageFilter"><option value="all">全部范围</option><option value="inside">共有范围内</option><option value="outside">共有范围外</option><option value="unknown">无共有范围</option></select></label><button id="resetFilter" class="button compact">清除筛选</button><span class="small">时间为北京时间；筛选只影响展示</span></div>
+          <div id="extraFilters" class="extra-filters" hidden><label>起始时间<input id="timeFrom" type="datetime-local" step="0.001"></label><label>结束时间<input id="timeTo" type="datetime-local" step="0.001"></label><label>连接会话<select id="connectionFilter"><option value="">全部连接</option></select></label><label id="coverageLabel" hidden>覆盖范围<select id="coverageFilter"><option value="all">全部范围</option><option value="inside">共有范围内</option><option value="outside">共有范围外</option><option value="unknown">无共有范围</option></select></label><button id="resetFilter" class="button compact">清除筛选</button><span class="small">时间为北京时间；筛选只影响展示</span></div>
           <div class="table-wrap"><table class="result-table"><thead><tr><th>类型</th><th id="sequenceHead">序号 HEX / DEC</th><th id="countHead">数量</th><th>源行</th></tr></thead><tbody id="eventRows"></tbody></table><div class="empty" id="empty" hidden></div></div>
           <div class="table-footer"><span id="listFooter"></span><div class="pagination"><button id="pagePrev" class="button compact" aria-label="上一页">上一页</button><span id="pageInfo"></span><button id="pageNext" class="button compact" aria-label="下一页">下一页</button></div></div>
         </section>
@@ -90,12 +94,13 @@
 </div>
 <dialog id="importDialog" class="import-dialog">
   <div class="dialog-heading"><h2>导入日志</h2><button class="button compact" data-close aria-label="关闭导入窗口">关闭</button></div>
-  <div class="import-types" role="group" aria-label="分析方式"><button class="button active" data-input="raw">原始接收</button><button class="button" data-input="filtered">过滤之后</button><button class="button" data-input="pair">两份配对</button></div>
+  <div class="import-types" role="group" aria-label="分析方式"><button class="button active" data-input="raw">原始接收</button><button class="button" data-input="filtered">过滤之后</button><button class="button" data-input="pair">两份配对</button><button class="button" data-input="connection">仅连接诊断</button></div>
   <p class="dialog-note" id="importDescription">选择同一设备的 abBle 原始接收日志。无法确认连续性的序号跳变会分段并标记待核对。</p>
   <div class="import-files">
     <label id="rawDrop" class="dropzone" tabindex="0"><svg class="ico"><use href="#i-file"/></svg><strong>原始接收日志</strong><span>点击选择，或拖入 abBle 文件</span><input type="file" id="rawFile" accept=".txt,.log,text/plain"><b id="rawFileName">尚未选择文件</b></label>
     <label id="filteredDrop" class="dropzone" tabindex="0" hidden><svg class="ico"><use href="#i-file"/></svg><strong>过滤后日志</strong><span>点击选择，或拖入 abFilter 文件</span><input type="file" id="filteredFile" accept=".txt,.log,text/plain"><b id="filteredFileName">尚未选择文件</b></label>
   </div>
+  <div class="connection-import"><label id="connectionDrop" class="dropzone" tabindex="0"><svg class="ico"><use href="#i-history"/></svg><strong>连接诊断日志 <span id="connectionOptional">（可选）</span></strong><span>点击选择，或拖入 bleConnection 文件</span><input type="file" id="connectionFile" accept=".txt,.log,text/plain"><b id="connectionFileName">尚未选择文件</b></label><button id="clearConnectionFile" class="button compact">移除连接诊断文件</button></div>
   <p class="small">文件在本机处理。支持 UTF-8、UTF-16、GB18030 编码；每份最多 128 MB。</p>
   <label class="remember-option"><input id="rememberLogs" type="checkbox" checked>分析完成后保存到本机历史（含完整日志）</label>
   <p id="importError" class="error-text" role="alert" hidden></p>
@@ -113,13 +118,13 @@
   <p id="historyEmpty" class="history-empty">还没有本机历史。导入日志并完成分析后会自动保存。</p>
 </dialog>
 <dialog id="exportDialog"><div class="dialog-heading"><h2>导出分析结果</h2><button class="button compact" data-close>关闭</button></div><p id="exportScope" class="dialog-note"></p>
-  <label class="export-scope">导出范围<select id="exportRange"><option value="all">全部文件异常与配对差异</option><option value="filtered">仅当前视图与筛选</option></select></label>
+  <label class="export-scope">导出范围<select id="exportRange"><option value="all">全部异常、配对差异与连接事件</option><option value="filtered">仅当前视图与筛选</option></select></label>
   <button class="button export-choice" id="csvBtn"><svg class="ico"><use href="#i-file"/></svg><span><strong>异常明细 CSV</strong><small>中文表头，包含序号、时间、源行和异常说明</small></span></button>
   <button class="button export-choice" id="txtBtn"><svg class="ico"><use href="#i-file"/></svg><span><strong>原始日志片段 TXT</strong><small>每条异常附关联记录前后各 5 行</small></span></button>
   <p class="small">导出以完整文件的分析结论为准，筛选不会重新计算缺号。</p>
 </dialog>
 <dialog id="aboutDialog"><div class="dialog-heading"><h2>判定说明</h2><button class="button compact" data-close>关闭</button></div>
-  <ul class="rules"><li>按源日志的记录顺序分析，所有命令共用一个 16 位序号。</li><li>先跳号、后补到的报文列为“乱序补到”；只有本段完整分析后仍未出现的序号列为“最终缺号”。文件首尾范围之外不补缺号。</li><li>同一段的同一周期同号且完整帧相同为重复；同号但内容不同单独列示。65535 → 0 为正常回绕。</li><li>周期按距离最近的序号作为候选解释，不能由此确定实际前进或回退。恰好相差半周期，或向观测范围之前倒退超过 4096 个序号时保守分段；小范围的开头补到仍参与同段统计。</li><li>序号跳变：候选序号链后移后至少 4 条连续递增，且移至本段起点之前、距已见最大值超过 4096；或随后最多 8 条中至少 3 个已出现序号带有新内容，标为“序号跳变待核对”。记录前后数值可能增大，也可能减小；详情分别展示数值变化和待核对状态。阈值只是工程默认值，不能证明方向或重启。普通缺口补到、原样重复和孤立同号异内容仍沿用原判定。</li><li>不同分析段不互相填补缺号。段内缺号为 0 不代表整份日志完整；段间是否缺失、是否重置或重放需要设备端记录确认。多设备混合、任意多段连接及跨周期极端迟到无法仅凭序号还原。</li><li>支持分片与一行多帧。只有完整帧且 CRC16 校验通过的序号参与统计。无法解析的记录保留原文。</li><li>缺号描述本日志的缺口，不直接等于蓝牙丢包。过滤后的缺号可能来自正常过滤。</li><li>配对依据原始接收时间戳与完整帧，逐次匹配，并显示出现次数及顺序差异；相同时间戳、相同帧的重复对应关系列为待核对。比较只呈现事实，不推测过滤原因。</li><li>图表概览保留每段最高与最低点，同位置的异常标记显示数量。普通报文也可点击；概览点击最近的实际采样记录，局部放大或使用相邻报文按钮逐包查看。原文可滚动完整文件，点击行同步更新序号、帧头与命令 / Key。一行多帧提供选择，非有效报文行清空解析；查看普通报文不改变异常统计和导出。</li><li>上包间隔按同一日志中相邻有效报文的接收时间相减，不按序号排序，不受命令筛选影响；分片使用起始片段时间，同一时间戳显示 0 ms，负值表示时间戳回退。跨分析段仍显示日志中的实际时间差；这不是设备采样周期或蓝牙空口时延。</li><li>勾选保存时，完成分析的完整日志会保存在当前浏览器的本机历史；演示和取消的任务不保存。不勾选且未手动保存的任务仅在当前页面保留。历史支持重新打开、搜索和删除；清除本站数据或关闭无痕窗口会丢失历史。没有日志上传、在线接口或外部统计。</li></ul>
+  <ul class="rules"><li>支持附加 bleConnection 连接诊断，或单独导入连接诊断文件。有序 ble_session 标记优先于异步连接回调，用于停止跨连接组包和序号统计。旧版 Disconnected、Link-lossOccur、Connected 和连接错误也保留为可定位的事件。</li><li>连接时间线分别显示尝试、链路连接、就绪和首次有效报文。“断开相关记录”是回调记录数，不是断线次数。重试耗尽、状态码和等待时长仅描述对应事件，不倒推最初断开原因。</li><li>连接编号只在一次应用进程内解释；重启后可以复用。不同文件只有相同结构化事件才去重并保留两处原文，没有锚点的诊断文件独立展示，不按时间强行切分报文。过滤日志只有唯一的接收时间戳与完整帧配对才关联原始会话；无法关联的报文范围单列待核对。</li><li>原始日志中的 backward_dup 决策仅在时间戳和序号唯一匹配时附到“仅原始有”明细。timeout_force 等未能唯一关联的文字仍保留原文，不自动认定蓝牙丢包或过滤错误。导出全部结果包含连接事件；本机历史可以同时保存三份原始文件。</li><li>按源日志的记录顺序分析，所有命令共用一个 16 位序号。</li><li>先跳号、后补到的报文列为“乱序补到”；只有本段完整分析后仍未出现的序号列为“最终缺号”。文件首尾范围之外不补缺号。</li><li>同一段的同一周期同号且完整帧相同为重复；同号但内容不同单独列示。65535 → 0 为正常回绕。</li><li>周期按距离最近的序号作为候选解释，不能由此确定实际前进或回退。恰好相差半周期，或向观测范围之前倒退超过 4096 个序号时保守分段；小范围的开头补到仍参与同段统计。</li><li>序号跳变：候选序号链后移后至少 4 条连续递增，且移至本段起点之前、距已见最大值超过 4096；或随后最多 8 条中至少 3 个已出现序号带有新内容，标为“序号跳变待核对”。记录前后数值可能增大，也可能减小；详情分别展示数值变化和待核对状态。阈值只是工程默认值，不能证明方向或重启。普通缺口补到、原样重复和孤立同号异内容仍沿用原判定。</li><li>不同分析段不互相填补缺号。段内缺号为 0 不代表整份日志完整；段间是否缺失、是否重置或重放需要设备端记录确认。同一设备有明确连接记录时按真实边界分段；无连接证据时仍保守判断序号。多设备混合及跨周期极端迟到无法仅凭序号还原。</li><li>支持分片与一行多帧。只有完整帧且 CRC16 校验通过的序号参与统计。无法解析的记录保留原文。</li><li>缺号描述本日志的缺口，不直接等于蓝牙丢包。过滤后的缺号可能来自正常过滤。</li><li>配对依据原始接收时间戳与完整帧，逐次匹配，并显示出现次数及顺序差异；相同时间戳、相同帧的重复对应关系列为待核对。比较只呈现事实，不推测过滤原因。</li><li>图表概览保留每段最高与最低点，同位置的异常标记显示数量。普通报文也可点击；概览点击最近的实际采样记录，局部放大或使用相邻报文按钮逐包查看。原文可滚动完整文件，点击行同步更新序号、帧头与命令 / Key。一行多帧提供选择，非有效报文行清空解析；查看普通报文不改变异常统计和导出。</li><li>上包间隔按同一日志中相邻有效报文的接收时间相减，不按序号排序，不受命令筛选影响；分片使用起始片段时间，同一时间戳显示 0 ms，负值表示时间戳回退。跨分析段仍显示日志中的实际时间差；这不是设备采样周期或蓝牙空口时延。</li><li>勾选保存时，完成分析的完整日志会保存在当前浏览器的本机历史；演示和取消的任务不保存。不勾选且未手动保存的任务仅在当前页面保留。历史支持重新打开、搜索和删除；清除本站数据或关闭无痕窗口会丢失历史。没有日志上传、在线接口或外部统计。</li></ul>
   <p class="small">序号默认同时显示 HEX 和十进制；AB 帧内偏移 6、7（第 7、8 字节）是序号，低字节在前。例如原文 04 84 = 0x8404 = 十进制 33796。选中记录后，黄色标记指出对应的原始字节；缺号仅高亮前后实际存在的报文。</p>
   <p class="small">日志格式：毫秒时间戳,十六进制报文。命令取消息体首字节，Key 仅展示消息体偏移 2 的可用值，具体含义以命令结构为准。</p>
 </dialog>
