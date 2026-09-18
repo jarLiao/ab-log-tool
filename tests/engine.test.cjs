@@ -17,6 +17,92 @@ const parse = (ids, side = 'raw') => E.parse(lines(ids), side + '.txt', side);
 const session=(id,event,t=base)=>`ble_session ${t}, connection=${id}, event=${event}`;
 const ble=(id,event,t=base,extra='')=>`ble_event ${t}, elapsed_ms=${t-base}, connection=${id}, event=${event}${extra?', '+extra:''}`;
 
+test('connection chart shows the interval switch and trailing disconnect, preserving duplicate callbacks and statistics',()=>{
+  const raw=E.parse([lines([100,101]),`${base+20},Watch Link-lossOccur`,`${base+26},Watch Link-lossOccur`,
+    `${base+300},Watch Connected`,`${base+310},${frame(102)}`,`${base+320},${frame(104)}`,
+    `${base+330},Watch Link-lossOccur`,`${base+343},Watch Link-lossOccur`,`${base+400},Watch Disconnected`].join('\n'));
+  const counts={...raw.counts},chart=E.chart({raw},'raw',{}),[switching,tail]=chart.connectionMarkers;
+  assert.equal(chart.wraps.length,1);assert.match(chart.wraps[0].label,/连接区间切换/);
+  assert.equal(chart.connectionMarkers.length,2);assert.equal(switching.index,2);assert.equal(switching.boundary,true);
+  assert.deepEqual(switching.events.map(e=>e.line),[3,4,5,6]);
+  assert.deepEqual(switching.events.map(e=>e.label),['连接丢失','连接丢失','连接已就绪','重新收到报文']);
+  assert.equal(switching.events[0].t,base+20);assert.equal(switching.events.at(-1).t,base+310);
+  assert.equal(tail.index,3);assert.equal(tail.afterLast,true);assert.equal(tail.label,'末尾连接丢失');
+  assert.deepEqual(tail.events.map(e=>e.line),[8,9,10]);assert.equal(tail.note,'本文件此后无有效报文');
+  assert.equal(raw.counts.frames,4);assert.equal(raw.counts.gap,1);assert.deepEqual(raw.counts,counts);
+  assert.equal(E.connections({raw}).counts.events,8);
+});
+
+test('a single packet plus a terminal disconnect has a marker even without a second segment',()=>{
+  const raw=E.parse([lines([100]),`${base+1},Watch Disconnected`].join('\n'));
+  const chart=E.chart({raw},'raw',{});
+  assert.equal(raw.segments,1);assert.equal(chart.wraps.length,0);assert.equal(chart.connectionMarkers.length,1);
+  assert.equal(chart.connectionMarkers[0].index,0);assert.equal(chart.connectionMarkers[0].label,'末尾连接断开');
+  const data={raw,connections:E.connections({raw})};
+  assert.equal(E.inspect(data,{source:'raw',line:chart.connectionMarkers[0].events[0].line}).detail.event.event,'disconnected');
+});
+
+test('ready without subsequent packets stays explicit and never claims resumed reception',()=>{
+  const raw=E.parse([lines([100]),`${base+10},Watch Disconnected`,`${base+20},Watch Connected`].join('\n'));
+  const tail=E.chart({raw},'raw',{}).connectionMarkers[0];
+  assert.equal(tail.label,'末尾连接已就绪');assert.equal(tail.note,'本文件此后无有效报文');
+  assert.ok(tail.events.every(e=>e.label!=='重新收到报文'));assert.equal(raw.segments,1);
+});
+
+test('zoom only includes source-position markers in view and does not invent a terminal event at the viewport edge',()=>{
+  const raw=E.parse([lines([100,101]),`${base+2},Watch Disconnected`,`${base+3},Watch Connected`,lines([102,103]),`${base+5},Watch Disconnected`].join('\n'));
+  assert.equal(E.chart({raw},'raw',{}, {lo:0,hi:1}).connectionMarkers.length,0);
+  const middle=E.chart({raw},'raw',{}, {lo:2,hi:2}).connectionMarkers;
+  assert.equal(middle.length,1);assert.equal(middle[0].boundary,true);assert.equal(middle[0].afterLast,false);
+  const end=E.chart({raw},'raw',{}, {lo:3,hi:3}).connectionMarkers;
+  assert.equal(end.length,1);assert.equal(end[0].afterLast,true);
+});
+
+test('a diagnostic inside a queued final frame is not a terminal disconnect or a new recovery packet',()=>{
+  const f=frame(100),raw=E.parse([session(1,'start'),base+','+f.slice(0,18),ble(1,'disconnected',base+2),
+    (base+3)+','+f.slice(18),session(1,'end')].join('\n'));
+  const [marker,end]=E.chart({raw},'raw',{}).connectionMarkers;
+  assert.equal(raw.rows.length,1);assert.equal(marker.withinFrame,true);assert.equal(marker.afterLast,false);
+  assert.match(marker.position,/分片之间/);assert.equal(marker.events.length,1);assert.equal(marker.note,'');
+  assert.equal(end.afterLast,true);assert.equal(end.label,'末尾会话结束记录');
+});
+
+test('ordered session end and stopped connection are shown without claiming a link loss',()=>{
+  for(const [event,label] of [[session(1,'end',base+2),'末尾会话结束记录'],[ble(1,'connection_stopped',base+2),'末尾停止连接记录']]){
+    const raw=E.parse([session(1,'start'),lines([100]),event].join('\n'));
+    const tail=E.chart({raw},'raw',{}).connectionMarkers[0];
+    assert.equal(tail.afterLast,true);assert.equal(tail.label,label);assert.equal(tail.events[0].line,3);
+  }
+});
+
+test('foreign diagnostic events and uncertain sequence jumps cannot manufacture chart connection markers',()=>{
+  const raw=parse([100,101]),connection=E.parse(ble(1,'disconnected'),'d.txt','connection');
+  assert.equal(E.chart({raw,connection},'raw',{}).connectionMarkers.length,0);
+  const uncertain=parse([10000,10001,500,501,502,503,504]);
+  assert.ok(E.chart({raw:uncertain},'raw',{}).wraps.length>0);
+  assert.equal(E.chart({raw:uncertain},'raw',{}).connectionMarkers.length,0);
+  assert.deepEqual(E.chart({connection},'connection',{}).connectionMarkers,[]);
+});
+
+test('chart events retain source order under clock rollback and before-first events remain visible',()=>{
+  const raw=E.parse([`${base+100},Watch Connected`,lines([100]),`${base+90},Watch Disconnected`,
+    `${base+50},Watch Connected`,`${base+60},${frame(101)}`].join('\n'));
+  const [start,switching]=E.chart({raw},'raw',{}).connectionMarkers;
+  assert.equal(start.beforeFirst,true);assert.equal(start.index,0);
+  assert.deepEqual(switching.events.map(e=>e.t),[base+90,base+50,base+60]);
+  assert.deepEqual(switching.events.map(e=>e.line),[3,4,5]);assert.equal(switching.boundary,true);
+});
+
+test('filtered chart uses inherited packet boundaries without borrowing raw callback locations',()=>{
+  const raw=E.parse([session(1,'start'),base+','+frame(100),ble(1,'disconnected'),session(1,'end'),session(2,'start'),(base+10)+','+frame(101)].join('\n'));
+  const filtered=E.parse([base+','+frame(100),(base+10)+','+frame(101)].join('\n'),'f.txt','filtered');
+  E.compare(raw,filtered);
+  const groups=E.chart({raw,filtered},'filtered',{}).connectionMarkers;
+  assert.equal(groups.length,1);assert.equal(groups[0].source,'filtered');
+  assert.equal(groups[0].events.length,1);assert.equal(groups[0].events[0].label,'本段首包');
+  assert.equal(groups[0].events[0].line,2);
+});
+
 test('real sessions reset duplicates, gaps and sequence lookahead without creating heuristic anomalies',()=>{
   for(const second of [[100,101],[104,105],[47995,47996,47997,47998]]){
     const s=E.parse([session(1,'start'),lines([100,101]),session(1,'end'),session(2,'start'),lines(second),session(2,'end')].join('\n'));

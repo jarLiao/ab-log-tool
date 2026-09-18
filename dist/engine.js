@@ -551,9 +551,50 @@
       return {side: s.side, total: s.lines.length, first: start,
         lines: s.lines.slice(start - 1, start - 1 + length).map((text, i) => ({n: start + i, text}))};
     }
+    function chartConnections(s, lo, hi, wraps) {
+      const rows = s.rows, groups = new Map();
+      const ensure = (slot, withinFrame = false) => {
+        const index = Math.min(slot, rows.length - 1), id = slot + (withinFrame ? ':inside' : ':before');
+        if (index < lo || index > hi) return null;
+        if (!groups.has(id)) groups.set(id, {id, index, source: s.side, afterLast: slot === rows.length,
+          beforeFirst: slot === 0 && !withinFrame, withinFrame, boundary: false, events: []});
+        return groups.get(id);
+      };
+      // Use this file's source order only. A separate diagnostic file must not supply
+      // chart positions merely because its timestamps or connection IDs look similar.
+      for (const e of s.connectionEvents) {
+        if (!['link_loss', 'disconnected', 'connection_ready', 'session_end', 'connection_stopped'].includes(e.event)) continue;
+        let a = 0, b = rows.length;
+        while (a < b) { const mid = (a + b) >>> 1; if (rows[mid].endLine < e.line) a = mid + 1; else b = mid; }
+        const group = ensure(a, !!rows[a] && rows[a].line < e.line);
+        if (group) group.events.push({event: e.event, label: C.labels[e.event], t: e.t, line: e.line, endLine: e.endLine});
+      }
+      for (const wrap of wraps) {
+        if (wrap.kind !== 'connection') continue;
+        const group = ensure(wrap.index), row = rows[wrap.index];
+        group.boundary = true;
+        const resumed = group.events.some(e => ['link_loss', 'disconnected'].includes(e.event));
+        group.events.push({event: 'packet', label: resumed ? '重新收到报文' : '本段首包',
+          t: row.t, line: row.line, endLine: row.endLine, index: row.index});
+      }
+      for (const group of groups.values()) {
+        group.events.sort((a, b) => a.line - b.line);
+        const last = group.events.at(-1);
+        const hasLoss = group.events.some(e => e.event === 'link_loss');
+        const hasDisconnect = group.events.some(e => e.event === 'disconnected');
+        const state = last.event === 'connection_ready' ? '连接已就绪' : hasLoss ? '连接丢失' : hasDisconnect ? '连接断开' :
+          last.event === 'connection_stopped' ? '停止连接记录' : '会话结束记录';
+        group.label = group.boundary ? '连接区间切换' : group.afterLast ?
+          '末尾' + state : hasLoss || hasDisconnect ? '断开记录' : state;
+        group.position = group.afterLast ? '最后一条报文之后' : group.withinFrame ? '第 ' + (group.index + 1) + ' 条报文分片之间' :
+          group.beforeFirst ? '第一条报文之前' : '第 ' + group.index + ' / ' + (group.index + 1) + ' 条报文之间';
+        group.note = group.afterLast ? '本文件此后无有效报文' : '';
+      }
+      return [...groups.values()].sort((a, b) => a.index - b.index || a.events[0].line - b.events[0].line);
+    }
     function chart(data, mode, filter, opts = {}) {
       const side = mode === 'pair' ? opts.side || 'raw' : mode, s = data[side], rows = s?.rows||[];
-      if (!rows.length) return {points: [], markers: [], total: 0, side, lo: 0, hi: 0};
+      if (!rows.length) return {points: [], markers: [], wraps: [], connectionMarkers: [], total: 0, side, lo: 0, hi: 0};
       const lo = Math.max(0, Math.min(rows.length - 1, opts.lo || 0));
       const hi = Math.max(lo, Math.min(rows.length - 1, opts.hi ?? rows.length - 1));
       const budget = 900, step = Math.max(1, Math.ceil((hi - lo + 1) / budget)), points = [];
@@ -582,8 +623,9 @@
       }
       const wraps = [];
       for (let i = lo; i <= hi; i++) if (rows[i].wrap || i > 0 && rows[i].segment !== rows[i - 1].segment) wraps.push({
-        index: i, sid: rows[i].sid, label: rows[i].wrap ? '正常回绕' : rows[i].boundaryKind==='attribution'?'连接归属变化 · 待核对':rows[i].boundaryKind==='connection'?'连接边界 · '+rows[i].connection:rows[i].boundaryKind === 'rollback' ? '序号跳变 · 待核对分段' : '待核对分段'});
-      return {points, markers: [...grouped.values()], wraps, total: rows.length, side, lo, hi};
+        index: i, sid: rows[i].sid, kind: rows[i].wrap ? 'wrap' : rows[i].boundaryKind,
+        label: rows[i].wrap ? '正常回绕' : rows[i].boundaryKind==='attribution'?'连接归属变化 · 待核对':rows[i].boundaryKind==='connection'?'连接区间切换 · '+rows[i].connection:rows[i].boundaryKind === 'rollback' ? '序号跳变 · 待核对分段' : '待核对分段'});
+      return {points, markers: [...grouped.values()], wraps, connectionMarkers: chartConnections(s, lo, hi, wraps), total: rows.length, side, lo, hi};
     }
     function exportParts(data, events, type, scope = '全部结果') {
       const statisticsScope=s=>s.counts.rollback||s.counts.uncertain?'按段统计；段间待核对':s.unassociatedRanges?'按连接归属范围统计；未关联报文待核对':s.connectionCount>1?'按连接统计；跨连接不比较序号':'单段统计';

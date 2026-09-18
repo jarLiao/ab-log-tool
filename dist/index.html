@@ -8,12 +8,12 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob:; script-src 'self'; worker-src blob:; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>AB 日志分析</title>
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./style.css?v=1.5.0">
-  <script src="./connections.js?v=1.5.0" defer></script>
-  <script src="./engine.js?v=1.5.0" defer></script>
-  <script src="./worker.js?v=1.5.0" defer></script>
-  <script src="./history.js?v=1.5.0" defer></script>
-  <script src="./app.js?v=1.5.0" defer></script>
+  <link rel="stylesheet" href="./style.css?v=1.5.1">
+  <script src="./connections.js?v=1.5.1" defer></script>
+  <script src="./engine.js?v=1.5.1" defer></script>
+  <script src="./worker.js?v=1.5.1" defer></script>
+  <script src="./history.js?v=1.5.1" defer></script>
+  <script src="./app.js?v=1.5.1" defer></script>
 </head>
 <body>
 <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -38,7 +38,7 @@
       <button class="navbtn" data-mode="connections" disabled><svg class="ico"><use href="#i-history"/></svg>连接时间线<span id="connectionCount" class="count">—</span></button>
     </nav>
     <div id="sourceNote" class="file-note">导入同一设备的日志，可附加连接诊断文件，按连接分段核对。</div>
-    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.5.0 · 网页工具</span></div>
+    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.5.1 · 网页工具</span></div>
   </aside>
   <main class="main">
     <header class="topbar">
@@ -66,8 +66,13 @@
           <div class="chart-controls"><label class="base-control">序号显示<select id="sequenceBase" aria-label="序号显示进制"><option value="hex">HEX 优先</option><option value="dec">十进制优先</option></select></label><select id="chartSide" aria-label="图表日志来源" hidden><option value="raw">原始接收</option><option value="filtered">过滤之后</option></select><button id="zoomIn" class="button compact" aria-label="放大图表">＋</button><button id="zoomOut" class="button compact" aria-label="缩小图表">−</button><div class="segmented"><button id="focusBtn" class="active">异常附近</button><button id="fullBtn">查看全程</button></div></div>
         </div>
         <div class="chart-body"><svg id="chart" class="chart-svg" role="group" aria-label="按接收顺序展示序号；标记可点击，异常列表提供文字与键盘访问"></svg></div>
-        <div class="chart-legend"><div class="legend-items"><span>— 序号</span><span class="gap-text">△ 缺号</span><span class="rollback-text">○ 跳变待核对</span><span class="reorder-text">◇ 乱序</span><span class="duplicate-text">□ 重复</span><span class="collision-text">× 同号异内容</span><span>│ 连接边界 / 正常回绕 / 待核对分段</span></div><span id="chartHint"></span></div>
+        <div class="chart-legend"><div class="legend-items"><span>— 序号</span><span class="gap-text">△ 缺号</span><span class="rollback-text">○ 跳变待核对</span><span class="reorder-text">◇ 乱序</span><span class="duplicate-text">□ 重复</span><span class="collision-text">× 同号异内容</span><span>│ 连接区间切换 / 正常回绕 / 待核对分段</span><span class="gap-text">● 断开记录 / 末尾连接状态</span></div><span id="chartHint"></span></div>
         <div class="chart-range"><label for="chartPan">移动查看范围</label><input id="chartPan" type="range" min="0" max="1000" value="0" aria-label="移动图表查看范围"></div>
+        <div id="chartConnections" class="chart-connections" hidden>
+          <div class="connection-caption"><p>横轴按报文顺序排列，断开期间不按时长留白。连接记录不等于断线次数；时间为 +08:00。</p><button id="chartTimeline" class="button compact">完整连接时间线</button></div>
+          <div id="chartConnectionCards" class="connection-cards"></div>
+          <p id="chartConnectionMore" class="small" hidden></p>
+        </div>
       </section>
       <div class="workbench">
         <section class="panel result-panel" aria-label="异常和差异列表">

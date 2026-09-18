@@ -1,7 +1,7 @@
 /* The worker owns parsed logs; original Files can be archived locally. */
 (function () {
   'use strict';
-  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.5.0', $ = id => document.getElementById(id);
+  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.5.1', $ = id => document.getElementById(id);
   const sourceLabel=side=>({raw:'原始接收',filtered:'过滤之后',connection:'连接诊断'}[side]||side);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const num = value => Number(value || 0).toLocaleString('zh-CN');
@@ -504,10 +504,26 @@
     });
     $('codeSections').scrollTop = 0;
   }
+  function renderChartConnections(c) {
+    const groups = c.connectionMarkers || [];
+    $('chartConnections').hidden = !groups.length;
+    const visible = groups.length > 6 ? [...groups.slice(0, 5), groups.at(-1)] : groups;
+    const limitEvents = events => events.length > 8 ? [...events.slice(0, 7), events.at(-1)] : events;
+    $('chartConnectionCards').innerHTML = visible.map(group => '<article class="connection-card' + (group.afterLast ? ' is-tail' : '') + '">' +
+      '<div class="connection-card-head"><strong>' + esc(group.label) + '</strong><span class="small">' + esc(group.position) + '</span></div>' +
+      (group.note ? '<p class="connection-card-note">' + esc(group.note) + '</p>' : '') +
+      limitEvents(group.events).map(e => '<button class="connection-entry" data-connection-line="' + e.line + '" aria-label="' +
+        esc(e.label + ' · ' + E.timestamp(e.t) + ' · 查看原文 L' + e.line) + '"><span>' + esc(e.label) + '</span><time>' +
+        esc(E.timestamp(e.t).slice(0, 23)) + '</time><span class="connection-line">L' + e.line + ' →</span></button>').join('') +
+      (group.events.length > 8 ? '<p class="small">另有 ' + (group.events.length - 8) + ' 条记录，请在完整连接时间线查看。</p>' : '') + '</article>').join('');
+    $('chartConnectionMore').hidden = groups.length <= visible.length;
+    $('chartConnectionMore').textContent = '当前范围有 ' + groups.length + ' 处连接标记，已展示前 5 处和最后 1 处；其余记录可在完整连接时间线查看。';
+  }
   function renderChart() {
     if (!currentView || $('workspace').hidden || mode==='connections') return;
     const c = currentView.chart, svg = $('chart'), W = Math.max(300, svg.clientWidth), H = svg.clientHeight || 224;
-    const ml = useHex() ? (W < 500 ? 61 : 73) : (W < 500 ? 48 : 61), mr = 20, mt = 21, mb = 35;
+    renderChartConnections(c);
+    const ml = useHex() ? (W < 500 ? 61 : 73) : (W < 500 ? 48 : 61), mr = 20, mt = c.connectionMarkers.length || c.wraps.length > 1 ? 48 : 21, mb = 35;
     svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
     if (!c.points.length) { svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#5b6b83" font-size="14">没有有效报文可绘制</text>'; return; }
     let min = Infinity, max = -Infinity;
@@ -544,7 +560,31 @@
         '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#285cce" stroke-dasharray="3 4" opacity=".5"/><circle cx="' + x(inspectedFrame.index) +
         '" cy="' + y(inspectedFrame.sid) + '" r="5" fill="#285cce" stroke="#fff" stroke-width="1.5"/></g>';
     }
-    for (const wrap of c.wraps) out += '<g class="chart-boundary" role="button" tabindex="0" data-record-index="'+wrap.index+'" aria-label="'+esc(wrap.label)+'"><title>'+esc(wrap.label)+' · 记录 '+(wrap.index+1)+'</title><rect x="'+(x(wrap.index)-12)+'" y="'+mt+'" width="24" height="'+(H-mb-mt)+'" fill="transparent"/><line x1="' + x(wrap.index) + '" x2="' + x(wrap.index) + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="#067d75" stroke-dasharray="4 4"/><text x="'+x(wrap.index)+'" y="12" text-anchor="middle" fill="#067d75" font-size="11">'+(wrap.label.startsWith('连接')?'连接边界':'分段 / 回绕')+'</text></g>';
+    const annotations = c.wraps.map(wrap => ({index: wrap.index, boundary: true, label: wrap.label,
+      text: wrap.kind === 'connection' ? '连接区间切换' : wrap.kind === 'attribution' ? '连接归属待核对' : '分段 / 回绕',
+      group: c.connectionMarkers.find(g => g.boundary && g.index === wrap.index)}));
+    for (const group of c.connectionMarkers) if (!group.boundary) annotations.push({index: group.index, label: group.label, text: group.label, group});
+    const labelSpans = [[], []];
+    // Reserve the terminal label first so dense internal boundaries cannot hide it.
+    for (const a of [...annotations].sort((a, b) => Number(!!b.group?.afterLast) - Number(!!a.group?.afterLast) || a.index - b.index)) {
+      const width = a.text.length * 12;
+      a.tx = Math.max(width / 2 + 6, Math.min(W - width / 2 - 6, x(a.index)));
+      const left = a.tx - width / 2, right = a.tx + width / 2;
+      a.lane = labelSpans.findIndex(spans => spans.every(span => right + 8 < span[0] || left > span[1] + 8));
+      if (a.lane >= 0) labelSpans[a.lane].push([left, right]);
+    }
+    for (const a of annotations.sort((a, b) => a.index - b.index)) {
+      const xx = x(a.index), color = a.group && !a.boundary ? '#a34f05' : '#067d75';
+      const title = a.label + (a.group ? ' · ' + a.group.position + (a.group.note ? ' · ' + a.group.note : '') + '\n' +
+        a.group.events.map(e => e.label + ' ' + E.timestamp(e.t) + ' · L' + e.line).join('\n') : ' · 记录 ' + (a.index + 1));
+      const attr = a.boundary ? 'class="chart-boundary" data-record-index="' + a.index + '"' :
+        'class="chart-connection" data-connection-id="' + a.group.id + '"';
+      out += '<g ' + attr + ' role="button" tabindex="0" aria-label="' + esc(title) + '"><title>' + esc(title) + '</title>' +
+        '<rect x="' + (xx - 12) + '" y="0" width="24" height="' + (H - mb) + '" fill="transparent"/>' +
+        '<line x1="' + xx + '" x2="' + xx + '" y1="' + mt + '" y2="' + (H - mb) + '" stroke="' + color + '" stroke-dasharray="4 4"/>' +
+        (!a.boundary ? '<circle cx="' + xx + '" cy="' + mt + '" r="4" fill="' + color + '"/>' : '') +
+        (a.lane >= 0 ? '<text x="' + a.tx + '" y="' + (14 + a.lane * 17) + '" text-anchor="middle" fill="' + color + '" font-size="12">' + esc(a.text) + '</text>' : '') + '</g>';
+    }
     const markerTotals = new Map(), markerSlots = new Map();
     for (const m of c.markers) markerTotals.set(m.index, (markerTotals.get(m.index) || 0) + 1);
     for (const m of c.markers) {
@@ -670,6 +710,15 @@
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); requestView({move: e.key === 'ArrowDown' ? 1 : -1}).then(() => $('eventRows').querySelector('[data-id="' + selected + '"]')?.focus({preventScroll: true})); }
   });
   $('chart').addEventListener('click', e => {
+    const connection = e.target.closest('[data-connection-id]');
+    if (connection) {
+      const group = currentView.chart.connectionMarkers.find(g => g.id === connection.dataset.connectionId);
+      const keepFocus = document.activeElement === connection;
+      inspectRecord({source: currentView.chart.side, line: group.events[0].line}).then(() => {
+        if (keepFocus) $('chart').querySelector('[data-connection-id="' + group.id + '"]')?.focus({preventScroll: true});
+      });
+      return;
+    }
     const el = e.target.closest('[data-chart-id]');
     if (!el) {
       let index = e.target.closest('[data-record-index]')?.dataset.recordIndex;
@@ -697,11 +746,22 @@
       e.preventDefault(); const c = currentView.chart, index = inspection?.source === c.side && inspection.index != null ? inspection.index : c.lo;
       inspectRecord({source: c.side, index: Math.max(0, Math.min(c.total - 1, index + (e.key === 'ArrowRight' ? 1 : -1)))}).then(() => $('chart').focus({preventScroll: true}));
     } else if (e.key === 'Enter' || e.key === ' ') {
-      const el = e.target.closest('[data-chart-id], [data-record-index]'); e.preventDefault();
+      const el = e.target.closest('[data-chart-id], [data-record-index], [data-connection-id]'); e.preventDefault();
       if (el) el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
       else if (currentView.chart.total) inspectRecord({source: currentView.chart.side, index: currentView.chart.lo});
     }
   });
+  $('chartTimeline').onclick = () => changeMode('connections');
+  $('chartConnectionCards').onclick = e => {
+    const button = e.target.closest('[data-connection-line]');
+    if (!button) return;
+    const line = Number(button.dataset.connectionLine);
+    inspectRecord({source: currentView.chart.side, line}).then(() => {
+      $('detailTitle').tabIndex = -1;
+      $('detailTitle').focus({preventScroll: true});
+      $('detailTitle').scrollIntoView({block: 'start'});
+    });
+  };
   $('prevBtn').onclick = () => requestView({move: -1}); $('nextBtn').onclick = () => requestView({move: 1});
   $('pagePrev').onclick = () => requestView({page: currentView.page - 1});
   $('pageNext').onclick = () => requestView({page: currentView.page + 1});
