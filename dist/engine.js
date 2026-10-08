@@ -759,6 +759,23 @@
       return {side: s.side, total: s.lines.length, first: start,
         lines: s.lines.slice(start - 1, start - 1 + length).map((text, i) => ({n: start + i, text}))};
     }
+    function searchLog(s, query, scope = 'all') {
+      if (!['all', 'timestamp'].includes(scope)) throw new Error('原文查询范围无效。');
+      const needle = String(query ?? '').trim().toLowerCase();
+      if (!needle) return [];
+      const matches = [];
+      for (let i = 0; i < s.lines.length; i++) {
+        const line = s.lines[i];
+        let start = -1;
+        if (scope === 'timestamp') {
+          // Search only the original timestamp before the comma, never packet bytes.
+          const prefix = /^\s*\d{10,16}(?=\s*[,，])/.exec(line);
+          if (prefix) start = prefix[0].indexOf(needle);
+        } else start = line.toLowerCase().indexOf(needle);
+        if (start >= 0) matches.push({line: i + 1, matchStart: start, matchEnd: start + needle.length});
+      }
+      return matches;
+    }
     function chartConnections(s, lo, hi, wraps) {
       const rows = s.rows, groups = new Map();
       const ensure = (slot, withinFrame = false) => {
@@ -898,7 +915,7 @@
       return out;
     }
     return {parse, compare, summary, crc16, makeFrame, names, title, label, timestamp,connections:C.timeline,connectionLabels:C.labels,
-      selectEvents, queryPackets, detail, inspect, framesAtLine, logWindow, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource, packetTiming, timingText};
+      selectEvents, queryPackets, detail, inspect, framesAtLine, logWindow, searchLog, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource, packetTiming, timingText};
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = createEngine(require('./connections.js'));
   else { root.ABEngineFactory = createEngine; root.ABEngine = createEngine(root.ABConnections); }

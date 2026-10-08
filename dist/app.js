@@ -1,7 +1,7 @@
 /* The worker owns parsed logs; original Files can be archived locally. */
 (function () {
   'use strict';
-  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.6.0', $ = id => document.getElementById(id);
+  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.7.0', $ = id => document.getElementById(id);
   const sourceLabel=side=>({raw:'原始接收',filtered:'过滤之后',connection:'连接诊断'}[side]||side);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const num = value => Number(value || 0).toLocaleString('zh-CN');
@@ -19,6 +19,7 @@
   let files = {raw: null, filtered: null,connection:null}, contextText = '', toastTimer, filterTimer, demo = false, started = 0;
   let inspection = null, logStates = [], detailKey = '', chartPoints = [];
   let packetView = null, packetActiveQuery = null, packetQueryTicket = 0, packetQueryTimer = null;
+  let rawSearchResult = null, rawSearchTicket = 0;
   let archive = null, historyEntries = [], historyDelete = null, historyTicket = 0, taskTicket = 0;
   let historyWrite = Promise.resolve();
   const LOG_ROW_HEIGHT = 28;
@@ -65,6 +66,7 @@
     archive = null; $('historySaveStatus').textContent = ''; $('saveHistoryBtn').hidden = true;
     inspection = null; detailKey = ''; logStates = []; chartPoints = [];
     resetPacketQuery(true);
+    clearRawSearch(true); $('rawSearchSource').innerHTML = '';
     meta = null; selected = ''; currentView = null; contextText = ''; renderId++;
     $('workspace').hidden = true; $('welcome').hidden = false; $('exportBtn').disabled = true;
     document.querySelectorAll('[data-mode]').forEach(b => { b.disabled = true; });
@@ -101,6 +103,8 @@
       const response = await rpc('load', {files: selectedFiles, fingerprint: !isDemo && !restored});
       if (ticket !== taskTicket) return;
       meta = response.meta;
+      $('rawSearchSource').innerHTML = ['raw', 'filtered', 'connection'].filter(side => meta[side]).map(side =>
+        '<option value="' + side + '" title="' + esc(meta[side].name) + '">' + sourceLabel(side) + '</option>').join('');
       $('progressDialog').close();
       $('welcome').hidden = true; $('workspace').hidden = false; $('exportBtn').disabled = false;
       $('rawCount').textContent = meta.raw ? num(meta.raw.counts.frames) : '—';
@@ -326,6 +330,8 @@
   async function changeMode(m) {
     mode = m; selected = ''; focused = true; activeChart = {side: m === 'filtered' ? 'filtered' : 'raw'};
     resetPacketQuery(false);
+    clearRawSearch(true);
+    $('rawSearchSource').value = m === 'filtered' ? 'filtered' : m === 'connections' ? (meta.connection ? 'connection' : meta.raw ? 'raw' : 'filtered') : 'raw';
     $('workspace').classList.toggle('connection-view',m==='connections');
     clearFilters();
     document.querySelectorAll('[data-mode]').forEach(b => { b.classList.toggle('active', b.dataset.mode === m); b.setAttribute('aria-pressed', String(b.dataset.mode === m)); });
@@ -436,17 +442,67 @@
     $('prevBtn').disabled = !v.total || v.selectedIndex === 0;
     $('nextBtn').disabled = !v.total || v.selectedIndex === v.total - 1;
   }
-  function rawMarkup(line, anchors, sectionIndex) {
+  function clearRawSearch(clearInput = false) {
+    const hadResult = !!rawSearchResult;
+    rawSearchTicket++; rawSearchResult = null;
+    if (clearInput) { $('rawSearch').value = ''; $('rawSearchScope').value = 'all'; }
+    $('rawSearchStatus').textContent = clearInput || !$('rawSearch').value.trim() ? '输入关键词后，可查找整份日志。' : '按 Enter 或点击查找，搜索整份日志。';
+    $('rawSearchPrev').disabled = $('rawSearchNext').disabled = true;
+    if (hadResult) for (const state of logStates) loadLogWindow(state, true);
+  }
+  async function searchRaw(index = null) {
+    const query = $('rawSearch').value.trim(), source = $('rawSearchSource').value, scope = $('rawSearchScope').value;
+    if (!query) { clearRawSearch(); $('rawSearchStatus').textContent = '请输入时间戳末几位或原文片段。'; $('rawSearch').focus(); return; }
+    if (!source) return;
+    const ticket = ++rawSearchTicket;
+    $('rawSearchStatus').textContent = '正在查找整份日志…';
+    $('rawSearchPrev').disabled = $('rawSearchNext').disabled = true;
+    try {
+      const fromLine = inspection?.source === source ? inspection.line || 1 : 1;
+      const result = await rpc('searchLog', {source, query, scope, index, fromLine});
+      if (ticket !== rawSearchTicket) return;
+      if (!result.total) {
+        rawSearchResult = null;
+        $('rawSearchStatus').textContent = sourceLabel(source) + '中未找到匹配行。可调整关键词或查找范围。';
+        return;
+      }
+      rawSearchResult = {...result, query, scope};
+      $('rawSearchStatus').textContent = '第 ' + num(result.index + 1) + ' / ' + num(result.total) + ' 处 · ' + sourceLabel(source) + ' L' + num(result.line);
+      $('rawSearchPrev').disabled = $('rawSearchNext').disabled = false;
+      await inspectRecord({source, line: result.line});
+      if (ticket !== rawSearchTicket) return;
+      const state = logStates.find(item => item.section.side === source);
+      if (!state) return;
+      scrollLogTo(state, result.line);
+      await loadLogWindow(state, true);
+      const mark = state.window.querySelector('.raw-search-hit');
+      if (mark) {
+        const box = state.code.getBoundingClientRect(), hit = mark.getBoundingClientRect();
+        if (hit.left < box.left + 60 || hit.right > box.right - 12) state.code.scrollLeft += hit.left - box.left - Math.min(95, box.width / 3);
+      }
+    } catch (error) {
+      if (ticket !== rawSearchTicket || error.message === '已取消') return;
+      rawSearchResult = null;
+      $('rawSearchStatus').textContent = '查找失败：' + error.message;
+    }
+  }
+  function rawSearchMarkup(text, offset, match) {
+    if (!match || !Number.isInteger(match.matchStart)) return esc(text);
+    const from = Math.max(offset, match.matchStart), to = Math.min(offset + text.length, match.matchEnd);
+    if (from >= to) return esc(text);
+    return esc(text.slice(0, from - offset)) + '<mark class="raw-search-hit">' + esc(text.slice(from - offset, to - offset)) + '</mark>' + esc(text.slice(to - offset));
+  }
+  function rawMarkup(line, anchors, sectionIndex, match) {
     const ranges = anchors.filter(a => a.line === line.n).sort((a, b) => a.start - b.start);
     let out = '', cursor = 0;
     for (const a of ranges) {
-      out += esc(line.text.slice(cursor, a.start)) + '<mark class="seq-byte-mark" tabindex="-1" data-source-byte="' +
+      out += rawSearchMarkup(line.text.slice(cursor, a.start), cursor, match) + '<mark class="seq-byte-mark" tabindex="-1" data-source-byte="' +
         sectionIndex + ':' + a.frameOffset + '" title="序号' + a.role + ' · AB 帧内偏移 ' + a.frameOffset +
         ' · 原文 L' + a.line + ' 第 ' + (a.start + 1) + '–' + a.end + ' 列">' +
-        esc(line.text.slice(a.start, a.end)) + '</mark>';
+        rawSearchMarkup(line.text.slice(a.start, a.end), a.start, match) + '</mark>';
       cursor = a.end;
     }
-    return out + esc(line.text.slice(cursor));
+    return out + rawSearchMarkup(line.text.slice(cursor), cursor, match);
   }
   function frameAnchor(frame, index) {
     if (!frame) return '<div class="sequence-anchor no-frame">本行无有效报文 · 序号 — · 命令 / Key — / —</div>';
@@ -502,12 +558,13 @@
       const result = await rpc('logWindow', {source: state.section.side, first, count: Math.ceil(state.code.clientHeight / LOG_ROW_HEIGHT) + 18});
       if (ticket !== state.ticket || !state.code.isConnected) return;
       const s = state.section, currentLine = state.selectedLine;
+      const match = rawSearchResult?.source === s.side ? rawSearchResult : null;
       state.window.style.top = (state.code.scrollTop - (state.code.scrollTop / unit - (first - 1)) * LOG_ROW_HEIGHT) + 'px';
       state.window.innerHTML = result.lines.map(l => '<div class="code-line ' + (l.n >= s.line && l.n <= s.endLine ? 'highlight' : '') +
-        (l.n === currentLine ? ' selected-line' : '') + (/error|reorder_skip/i.test(l.text) ? ' diagnostic' : '') +
+        (l.n === currentLine ? ' selected-line' : '') + (l.n === match?.line ? ' raw-search-line' : '') + (/error|reorder_skip/i.test(l.text) ? ' diagnostic' : '') +
         '" role="option" id="log-line-' + state.index + '-' + l.n + '" aria-posinset="' + l.n + '" aria-setsize="' + result.total +
         '" aria-selected="' + (l.n === currentLine) + '" tabindex="-1" data-log-line="' + l.n + '"><span class="ln">' + l.n +
-        '</span><code>' + rawMarkup(l, s.frame?.anchors || [], state.index) + '</code></div>').join('');
+        '</span><code>' + rawMarkup(l, s.frame?.anchors || [], state.index, l.n === match?.line ? match : null) + '</code></div>').join('');
       if (result.lines.some(l => l.n === currentLine)) state.code.setAttribute('aria-activedescendant', 'log-line-' + state.index + '-' + currentLine);
       else state.code.removeAttribute('aria-activedescendant');
       state.status.textContent = 'L' + first + '–L' + (first + result.lines.length - 1) + ' / 共 ' + num(result.total) + ' 行 · 点击行查看解析';
@@ -737,6 +794,12 @@
   }
   $('newTask').onclick = $('welcomeImport').onclick = openImport;
   $('sequenceBase').onchange = () => { if (currentView) { renderList(); renderDetail(); renderChart(); } };
+  $('rawSearchForm').onsubmit = event => { event.preventDefault(); searchRaw(); };
+  $('rawSearch').oninput = () => clearRawSearch();
+  $('rawSearchSource').onchange = () => clearRawSearch();
+  $('rawSearchScope').onchange = () => clearRawSearch();
+  $('rawSearchPrev').onclick = () => { if (rawSearchResult) searchRaw(rawSearchResult.index - 1); };
+  $('rawSearchNext').onclick = () => { if (rawSearchResult) searchRaw(rawSearchResult.index + 1); };
   $('codeSections').addEventListener('click', e => {
     const button = e.target.closest('[data-locate-byte]');
     if (button) { revealByte(button.dataset.locateByte, true); return; }

@@ -607,6 +607,64 @@ test('whole-log windows retain unmodified physical lines and bound each transfer
   assert.equal(E.detail({raw:s},s.events[0]).sections[0].totalLines,2000);
 });
 
+test('whole-log search finds original text but timestamp scope excludes payload and diagnostics', () => {
+  const text = ['  1800000009067  ,ABCD1234', '1800000000001,aa9067bb', 'diagnostic 9067', '1800000000002,deadbeef'].join('\n');
+  const s = E.parse(text);
+  assert.deepEqual(E.searchLog(s, '9067'), [
+    {line: 1, matchStart: 11, matchEnd: 15},
+    {line: 2, matchStart: 16, matchEnd: 20},
+    {line: 3, matchStart: 11, matchEnd: 15}
+  ]);
+  assert.deepEqual(E.searchLog(s, '9067', 'timestamp'), [{line: 1, matchStart: 11, matchEnd: 15}]);
+  assert.deepEqual(E.searchLog(s, 'abcd'), [{line: 1, matchStart: 18, matchEnd: 22}]);
+  assert.deepEqual(E.searchLog(s, 'BeEf'), [{line: 4, matchStart: 18, matchEnd: 22}]);
+  assert.deepEqual(E.searchLog(s, 'no match'), []);
+  assert.deepEqual(E.searchLog(s, '   '), []);
+  assert.throws(() => E.searchLog(s, '9067', 'invalid'), /范围无效/);
+});
+
+test('worker whole-log search wraps by index and keeps raw and filtered sources separate', async () => {
+  const vm = require('node:vm');
+  const messages = [], self = {ABEngine: E, postMessage: message => messages.push(message)};
+  vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname, '../dist/worker.js'), 'utf8') + '\nabWorkerMain();',
+    {self, TextDecoder, Uint8Array, performance});
+  const makeFile = (name, text) => {
+    const bytes = Buffer.from(text);
+    return {name, size: bytes.length, arrayBuffer: async () => Uint8Array.from(bytes).buffer};
+  };
+  const raw = ['1800000009067,' + frame(100), 'diagnostic 9067', '1800000000002,' + frame(101)].join('\n');
+  const filtered = ['1800000000003,' + frame(100), 'diagnostic 9067'].join('\n');
+  async function request(id, type, args) {
+    await self.onmessage({data: {id, type, ...args}});
+    const result = messages.findLast(message => message.id === id);
+    assert.ok(result, 'worker response ' + id);
+    assert.notEqual(result.type, 'error', result.message);
+    return result;
+  }
+  await request(1, 'load', {files: {raw: makeFile('raw.txt', raw), filtered: makeFile('filtered.txt', filtered)}});
+  assert.deepEqual(JSON.parse(JSON.stringify(await request(2, 'searchLog',
+    {source: 'raw', query: '9067', scope: 'all', fromLine: 2}))),
+    {id: 2, type: 'searchLog', source: 'raw', total: 2, index: 1, line: 2, matchStart: 11, matchEnd: 15});
+  const wrapped = await request(3, 'searchLog', {source: 'raw', query: '9067', scope: 'all', index: 2});
+  assert.equal(wrapped.index, 0); assert.equal(wrapped.line, 1);
+  const previous = await request(4, 'searchLog', {source: 'raw', query: '9067', scope: 'all', index: -1});
+  assert.equal(previous.index, 1); assert.equal(previous.line, 2);
+  const fromEnd = await request(5, 'searchLog', {source: 'raw', query: '9067', scope: 'all', fromLine: 3});
+  assert.equal(fromEnd.index, 0); assert.equal(fromEnd.line, 1);
+  const timestamp = await request(6, 'searchLog', {source: 'raw', query: '9067', scope: 'timestamp'});
+  assert.equal(timestamp.total, 1); assert.equal(timestamp.line, 1);
+  const filteredMatch = await request(7, 'searchLog', {source: 'filtered', query: '9067', scope: 'all'});
+  assert.equal(filteredMatch.total, 1); assert.equal(filteredMatch.line, 2); assert.equal(filteredMatch.source, 'filtered');
+  const missing = await request(8, 'searchLog', {source: 'raw', query: 'missing', scope: 'all'});
+  assert.equal(missing.total, 0); assert.equal(missing.index, -1); assert.equal(missing.line, null);
+  const unloaded = await self.onmessage({data: {id: 9, type: 'searchLog', source: 'unknown', query: '9067'}});
+  assert.equal(unloaded, undefined);
+  assert.match(messages.findLast(message => message.id === 9).message, /来源不存在/);
+  await request(10, 'load', {files: {raw: makeFile('new-raw.txt', '1800000000004,' + frame(102))}});
+  const afterReload = await request(11, 'searchLog', {source: 'raw', query: '9067', scope: 'all'});
+  assert.equal(afterReload.total, 0); assert.equal(afterReload.line, null);
+});
+
 if(process.env.AB_ROLLBACK_LOG) test('reported rollback log contains six distinct counter transitions', () => {
   const s=E.parse(fs.readFileSync(process.env.AB_ROLLBACK_LOG,'utf8'));
   assert.equal(s.counts.frames,27888); assert.equal(s.counts.rollback,6); assert.equal(s.segments,7);

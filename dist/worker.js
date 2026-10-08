@@ -4,6 +4,7 @@ function abWorkerMain() {
   const E = self.ABEngine;
   let data = {}, cachedKey = '', cachedEvents = [], lastProgress = 0;
   let cachedPacketKey = '', cachedPacketQuery = null;
+  let cachedLogKey = '', cachedLogMatches = [];
   function sendProgress(percent, text) {
     const now = Date.now();
     if (now - lastProgress > 80 || percent >= 100) {
@@ -64,6 +65,7 @@ function abWorkerMain() {
     try {
       if (type === 'load') {
         data = {}; cachedEvents = []; cachedKey = ''; cachedPacketKey = ''; cachedPacketQuery = null;
+        cachedLogKey = ''; cachedLogMatches = [];
         const sides = Object.keys(msg.files), fingerprints = {};
         for (let i = 0; i < sides.length; i++) {
           const side = sides[i], file = msg.files[side];
@@ -128,6 +130,34 @@ function abWorkerMain() {
       } else if (type === 'logWindow') {
         if (!data[msg.source]?.lines) throw new Error('日志来源不存在。');
         self.postMessage({id, type, ...E.logWindow(data[msg.source], msg.first, msg.count)});
+      } else if (type === 'searchLog') {
+        const source = msg.source, s = data[source];
+        if (!s?.lines) throw new Error('日志来源不存在。');
+        const query = String(msg.query ?? '').trim();
+        const scope = msg.scope || 'all';
+        const key = JSON.stringify([source, query.toLowerCase(), scope]);
+        if (key !== cachedLogKey) {
+          cachedLogMatches = E.searchLog(s, query, scope);
+          cachedLogKey = key;
+        }
+        const total = cachedLogMatches.length;
+        let index = -1;
+        if (total) {
+          if (Number.isInteger(msg.index)) index = ((msg.index % total) + total) % total;
+          else {
+            const fromLine = Math.max(1, Math.floor(Number(msg.fromLine) || 1));
+            let lo = 0, hi = total;
+            while (lo < hi) {
+              const mid = (lo + hi) >>> 1;
+              if (cachedLogMatches[mid].line < fromLine) lo = mid + 1;
+              else hi = mid;
+            }
+            index = lo < total ? lo : 0;
+          }
+        }
+        const match = cachedLogMatches[index];
+        self.postMessage({id, type, source, total, index, line: match?.line ?? null,
+          matchStart: match?.matchStart ?? null, matchEnd: match?.matchEnd ?? null});
       } else if (type === 'export') {
         const events = msg.scope === 'filtered' ? getEvents(msg.mode, msg.filter) :
           [...(data.raw?.events || []), ...(data.filtered?.events || []), ...(data.pair?.events || []),...(data.connection?.events||[]),...data.connections.events];

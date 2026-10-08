@@ -8,12 +8,12 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob:; script-src 'self'; worker-src blob:; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>AB 日志分析</title>
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./style.css?v=1.6.0">
-  <script src="./connections.js?v=1.6.0" defer></script>
-  <script src="./engine.js?v=1.6.0" defer></script>
-  <script src="./worker.js?v=1.6.0" defer></script>
-  <script src="./history.js?v=1.6.0" defer></script>
-  <script src="./app.js?v=1.6.0" defer></script>
+  <link rel="stylesheet" href="./style.css?v=1.7.0">
+  <script src="./connections.js?v=1.7.0" defer></script>
+  <script src="./engine.js?v=1.7.0" defer></script>
+  <script src="./worker.js?v=1.7.0" defer></script>
+  <script src="./history.js?v=1.7.0" defer></script>
+  <script src="./app.js?v=1.7.0" defer></script>
 </head>
 <body>
 <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -38,7 +38,7 @@
       <button class="navbtn" data-mode="connections" disabled><svg class="ico"><use href="#i-history"/></svg>连接时间线<span id="connectionCount" class="count">—</span></button>
     </nav>
     <div id="sourceNote" class="file-note">导入同一设备的日志，可附加连接诊断文件，按连接分段核对。</div>
-    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.6.0 · 网页工具</span></div>
+    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.7.0 · 网页工具</span></div>
   </aside>
   <main class="main">
     <header class="topbar">
@@ -103,6 +103,15 @@
           <div class="record-controls" id="recordControls" hidden><button class="button compact" id="recordPrev">上一报文</button><span id="recordPosition"></span><button class="button compact" id="recordNext">下一报文</button><button class="button compact" id="backToEvent" hidden>返回异常</button></div>
           <div class="record-choices" id="recordChoices" hidden></div>
           <div class="raw-header"><span id="contextTitle">原文浏览 · 完整日志</span><button id="copyBtn" class="button compact" disabled>复制片段</button></div>
+          <form id="rawSearchForm" class="raw-search" role="search" aria-label="查找完整日志原文">
+            <div class="raw-search-controls">
+              <label class="raw-search-field">查找原文<input id="rawSearch" type="search" maxlength="128" autocomplete="off" placeholder="时间戳末4位或原文片段"></label>
+              <label class="raw-search-source">日志文件<select id="rawSearchSource" aria-label="查找的日志文件"></select></label>
+              <label class="raw-search-scope">查找范围<select id="rawSearchScope" aria-label="原文查找范围"><option value="all">整行</option><option value="timestamp">仅时间戳</option></select></label>
+              <button id="rawSearchSubmit" class="button compact" type="submit">查找</button>
+            </div>
+            <div class="raw-search-nav"><span id="rawSearchStatus" role="status" aria-live="polite">输入关键词后，可查找整份日志。</span><button id="rawSearchPrev" class="button compact" type="button" disabled>上一处</button><button id="rawSearchNext" class="button compact" type="button" disabled>下一处</button></div>
+          </form>
           <div class="code-sections" id="codeSections"></div>
           <div class="context-note" id="contextNote"></div>
         </section>
