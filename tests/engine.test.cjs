@@ -16,6 +16,132 @@ const lines = ids => ids.map((id, i) => (base + i) + ',' + (typeof id === 'numbe
 const parse = (ids, side = 'raw') => E.parse(lines(ids), side + '.txt', side);
 const session=(id,event,t=base)=>`ble_session ${t}, connection=${id}, event=${event}`;
 const ble=(id,event,t=base,extra='')=>`ble_event ${t}, elapsed_ms=${t-base}, connection=${id}, event=${event}${extra?', '+extra:''}`;
+const keyed = (sid, command = 0xfb, key = 0x02, value = 0xaa) => frame(sid, [command, 2, key, value]);
+
+test('packet query uses the complete stream, not filtered Command/Key jumps, for continuity', () => {
+  const raw = E.parse([keyed(100), frame(101, [0x01, 2, 0x10, 0xbb]), keyed(102)]
+    .map((hex, i) => `${base + i},${hex}`).join('\n'));
+  const result = E.queryPackets({raw}, {command: 'FB', key: '02'});
+  assert.deepEqual(result.items.map(row => row.sid), [100, 102]);
+  assert.equal(result.total, 2);
+  assert.equal(result.continuity.kind, 'continuous');
+  assert.equal(result.continuity.globalMissing, 0);
+  assert.equal(result.continuity.otherPackets, 1);
+  assert.equal(result.items[1].between.otherPackets, 1);
+  assert.match(result.scopeNote, /完整原始日志/);
+});
+
+test('a real global sequence gap is visible but cannot be attributed to selected Command/Key', () => {
+  const raw = E.parse([keyed(100), keyed(103)].map((hex, i) => `${base + i},${hex}`).join('\n'));
+  const result = E.queryPackets({raw}, {command: '0xFB', key: '0x02'});
+  assert.equal(result.continuity.kind, 'gap');
+  assert.equal(result.continuity.globalMissing, 2);
+  assert.equal(result.items[1].between.kind, 'gap');
+  assert.match(result.continuity.text, /Command\/Key 未知/);
+});
+
+test('final gaps count by global SEQ even when their event anchor arrives after the matching pair', () => {
+  const raw = E.parse([keyed(100), keyed(104), frame(105, [0x01, 2, 0x10, 0xbb]),
+    frame(103, [0x01, 2, 0x10, 0xbb])].map((hex, i) => `${base + i},${hex}`).join('\n'));
+  const gap = raw.events.find(event => event.kind === 'gap');
+  assert.equal(gap.count, 2);
+  assert.equal(gap.index, 3); // The gap event points after the second FB/02 source row.
+  const result = E.queryPackets({raw}, {command: 'FB', key: '02'});
+  assert.deepEqual(result.items.map(row => row.sid), [100, 104]);
+  assert.equal(result.continuity.kind, 'gap');
+  assert.equal(result.continuity.globalMissing, 2);
+  assert.equal(result.items[1].between.globalMissing, 2);
+});
+
+test('matching packets observed in reverse sequence order have unknown continuity', () => {
+  const raw = E.parse([keyed(103), keyed(100)].map((hex, i) => `${base + i},${hex}`).join('\n'));
+  const result = E.queryPackets({raw}, {command: 'FB', key: '02'});
+  assert.equal(result.total, 2);
+  assert.equal(result.continuity.kind, 'unknown');
+  assert.equal(result.continuity.unknownPairs, 1);
+  assert.equal(result.items[1].between.kind, 'unknown');
+});
+
+test('overlapping comparable intervals count each final missing SEQ only once', () => {
+  const raw = E.parse([100, 110, 105, 120]
+    .map((sid, i) => `${base + i},${keyed(sid)}`).join('\n'));
+  const result = E.queryPackets({raw}, {command: 'FB', key: '02'});
+  assert.deepEqual(result.items.map(row => row.sid), [100, 110, 105, 120]);
+  assert.deepEqual(result.items.map(row => row.between.kind), ['start', 'gap', 'unknown', 'gap']);
+  assert.deepEqual(result.items.map(row => row.between.globalMissing), [0, 8, 0, 13]);
+  assert.equal(result.continuity.unknownPairs, 1);
+  assert.equal(result.continuity.globalMissing, 17); // Unique 101–104, 106–109, 111–119.
+});
+
+test('packet query matches any protocol Key and excludes malformed Key bodies from Key matches', () => {
+  const multi = frame(100, [0xfb, 2, 0x02, 0xaa, 3, 0x03, 0xbb, 0xcc]);
+  const malformed = frame(101, [0xfb, 5, 0x02, 0xaa]);
+  const zeroLengthExtension = frame(102, [0xfb, 0, 0x04, 0xdd]);
+  const raw = E.parse([multi, malformed, zeroLengthExtension]
+    .map((hex, i) => `${base + i},${hex}`).join('\n'));
+  assert.equal(raw.counts.parse, 0); // The outer frames and CRCs are valid.
+  const byCommand = E.queryPackets({raw}, {command: 'FB'});
+  assert.equal(byCommand.total, 3);
+  assert.deepEqual(byCommand.keyOptions, [2, 3, 4]);
+  assert.deepEqual(byCommand.items.map(row => row.keysValid), [true, false, true]);
+  assert.deepEqual(byCommand.items[0].keys, [2, 3]);
+  assert.deepEqual(E.queryPackets({raw}, {command: 'FB', key: '03'}).items.map(row => row.sid), [100]);
+  assert.deepEqual(E.queryPackets({raw}, {command: 'FB', key: '02'}).items.map(row => row.sid), [100]);
+  assert.deepEqual(E.queryPackets({raw}, {command: 'FB', key: '04'}).items.map(row => row.sid), [102]);
+});
+
+test('packet query handles 16-bit SEQ wrap without manufacturing a gap', () => {
+  const raw = E.parse([keyed(65534), frame(65535, [0x01, 2, 0x10, 0xbb]), keyed(0)]
+    .map((hex, i) => `${base + i},${hex}`).join('\n'));
+  const result = E.queryPackets({raw}, {command: 'FB', key: '02'});
+  assert.equal(raw.wraps, 1);
+  assert.deepEqual(result.items.map(row => row.sid), [65534, 0]);
+  assert.equal(result.continuity.kind, 'continuous');
+  assert.equal(result.continuity.globalMissing, 0);
+  assert.equal(result.continuity.otherPackets, 1);
+});
+
+test('packet query never compares SEQ across a connection boundary', () => {
+  const raw = E.parse([session(1, 'start'), `${base},${keyed(100)}`, session(1, 'end'),
+    session(2, 'start'), `${base + 10},${keyed(105)}`].join('\n'));
+  const result = E.queryPackets({raw}, {command: 'FB', key: '02'});
+  assert.equal(result.total, 2);
+  assert.equal(result.continuity.kind, 'unknown');
+  assert.equal(result.continuity.unknownPairs, 1);
+  assert.equal(result.continuity.globalMissing, 0);
+  assert.equal(result.items[1].between.kind, 'unknown');
+});
+
+test('filtered-only packets cannot establish loss, while exact raw anchors restore global evidence', () => {
+  const text = [keyed(100), frame(101, [0x01, 2, 0x10, 0xbb]), keyed(102)]
+    .map((hex, i) => `${base + i},${hex}`).join('\n');
+  const filteredText = text.split('\n').filter((_, i) => i !== 1).join('\n');
+  const filtered = E.parse(filteredText, 'abFilter.txt', 'filtered');
+  const alone = E.queryPackets({filtered}, {command: 'FB', key: '02'});
+  assert.equal(alone.continuity.kind, 'unknown');
+  assert.equal(alone.continuity.unknownPairs, 1);
+  assert.equal(alone.continuity.globalMissing, 0);
+  assert.ok(alone.items.every(row => !row.anomalies.includes('gap')));
+  assert.match(alone.continuity.text, /只有过滤日志/);
+  const raw = E.parse(text, 'abBle.txt', 'raw');
+  E.compare(raw, filtered);
+  const paired = E.queryPackets({raw, filtered}, {side: 'filtered', command: 'FB', key: '02'});
+  assert.equal(paired.continuity.kind, 'continuous');
+  assert.equal(paired.continuity.otherPackets, 1);
+  assert.equal(paired.continuity.globalMissing, 0);
+});
+
+test('packet query pagination preserves full-range continuity and previous-page context', () => {
+  const raw = E.parse(Array.from({length: 5}, (_, i) => `${base + i},${keyed(100 + i)}`).join('\n'));
+  const page = E.queryPackets({raw}, {command: 'FB', key: '02', pageSize: 2, page: 1});
+  assert.equal(page.total, 5);
+  assert.equal(page.page, 1);
+  assert.deepEqual(page.items.map(row => row.sid), [102, 103]);
+  assert.equal(page.items[0].between.kind, 'continuous');
+  assert.equal(page.continuity.comparablePairs, 4);
+  assert.deepEqual(E.queryPackets({raw}, {command: 'FB', pageSize: 2, page: 100})
+    .items.map(row => row.sid), [104]);
+});
 
 test('connection chart shows the interval switch and trailing disconnect, preserving duplicate callbacks and statistics',()=>{
   const raw=E.parse([lines([100,101]),`${base+20},Watch Link-lossOccur`,`${base+26},Watch Link-lossOccur`,

@@ -3,6 +3,7 @@ function abWorkerMain() {
   'use strict';
   const E = self.ABEngine;
   let data = {}, cachedKey = '', cachedEvents = [], lastProgress = 0;
+  let cachedPacketKey = '', cachedPacketQuery = null;
   function sendProgress(percent, text) {
     const now = Date.now();
     if (now - lastProgress > 80 || percent >= 100) {
@@ -20,6 +21,26 @@ function abWorkerMain() {
     const arr = id[0]==='T'?data.connections?.events:id[0]==='D'?data.connection?.events:id[0] === 'R' ? data.raw?.events : id[0] === 'F' ? data.filtered?.events :
       id[0] === 'M' ? data.pair?.matches : data.pair?.events;
     return arr?.[index] || null;
+  }
+  function packetMatches(query, chart) {
+    if (!query || query.side !== chart.side || !chart.total) return [];
+    const key = JSON.stringify([query.side, query.command, query.key]);
+    if (key !== cachedPacketKey) {
+      cachedPacketQuery = E.queryPackets(data, {...query, page: 0, pageSize: 1});
+      cachedPacketKey = key;
+    }
+    const indices = cachedPacketQuery.matchIndices || [];
+    let left = 0, right = indices.length;
+    while (left < right) { const mid = (left + right) >> 1; if (indices[mid] < chart.lo) left = mid + 1; else right = mid; }
+    const first = left;
+    right = indices.length;
+    while (left < right) { const mid = (left + right) >> 1; if (indices[mid] <= chart.hi) left = mid + 1; else right = mid; }
+    const end = left, step = Math.max(1, Math.ceil((end - first) / 120)), rows = data[chart.side].rows, matches = [];
+    for (let i = first; i < end; i += step) {
+      const last = Math.min(end, i + step) - 1, center = indices[Math.floor((i + last) / 2)], row = rows[center];
+      matches.push({index: center, sid: row.sid, line: row.line, count: last - i + 1, lo: indices[i], hi: indices[last]});
+    }
+    return matches;
   }
   async function read(file, fingerprint) {
     const buffer = await file.arrayBuffer(), bytes = new Uint8Array(buffer);
@@ -42,7 +63,7 @@ function abWorkerMain() {
     const {id, type} = msg;
     try {
       if (type === 'load') {
-        data = {}; cachedEvents = []; cachedKey = '';
+        data = {}; cachedEvents = []; cachedKey = ''; cachedPacketKey = ''; cachedPacketQuery = null;
         const sides = Object.keys(msg.files), fingerprints = {};
         for (let i = 0; i < sides.length; i++) {
           const side = sides[i], file = msg.files[side];
@@ -93,10 +114,15 @@ function abWorkerMain() {
           const side = focus.source;
           chartOptions = {side, lo: Math.max(0, focus.index - 20), hi: focus.index + 20};
         }
+        const chart = E.chart(data, msg.mode, msg.filter, chartOptions);
+        chart.packetMatches = packetMatches(msg.packetQuery, chart);
         self.postMessage({id, type: 'view', total: events.length, page, pageSize,
           selectedIndex, selected: selected?.id || '',
           items: events.slice(page * pageSize, (page + 1) * pageSize),
-          inspection: inspection?.selection || null, detail: inspection?.detail || E.detail(data, selected), chart: E.chart(data, msg.mode, msg.filter, chartOptions)});
+          inspection: inspection?.selection || null, detail: inspection?.detail || E.detail(data, selected), chart});
+      } else if (type === 'packetQuery') {
+        const {matchIndices, ...result} = E.queryPackets(data, msg.query);
+        self.postMessage({id, type, ...result});
       } else if (type === 'inspect') {
         self.postMessage({id, type, ...E.inspect(data, msg.selection)});
       } else if (type === 'logWindow') {

@@ -26,6 +26,21 @@
     const hexWord = n => n == null ? '' : '0x' + mod(n).toString(16).padStart(4, '0').toUpperCase();
     const sequenceBytes = n => n == null ? '' : hexByte(n & 255).slice(2) + ' ' + hexByte((n >>> 8) & 255).slice(2);
     const toHex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    function readKeys(bytes, bodyStart, finish) {
+      // EV-07B 2.6: Key Length includes the Key byte. Match Android's
+      // AbReceiveWindow.Kind.read, including its final zero-length extension.
+      const keys = [];
+      let offset = bodyStart + 1;
+      if (offset >= finish) return {keys, valid: false};
+      while (offset < finish) {
+        let length = bytes[offset];
+        if (length === 0) length = finish - offset - 1;
+        if (length < 1 || offset + 1 + length > finish) return {keys: [], valid: false};
+        keys.push(bytes[offset + 1]);
+        offset += length + 1;
+      }
+      return {keys, valid: true};
+    }
     function makeFrame(sid, body = [0x7b, 3, 0x12, 0], props = 0) {
       const bytes = Uint8Array.from([0xab, props, body.length & 255, body.length >>> 8, 0, 0, sid & 255, sid >>> 8, ...body]);
       const c = crc16(bytes, 8);
@@ -108,9 +123,13 @@
           const high = locate(absolute + begin + 7);
           const highLine = high.line, highOffset = absolute + begin + 7 - high.start;
           const b = locate(absolute + finish - 1);
+          const keyBody = readKeys(buf, begin + 8, finish);
           result.rows.push({index: result.rows.length, line: a.line, endLine: b.line, t: a.t, connectionKey:a.connectionKey,
             sid: word(begin + 6), props: buf[begin + 1], cmd: bodyLength ? buf[begin + 8] : null,
-            key: bodyLength >= 3 ? buf[begin + 10] : null, bodyLength,
+            // Retain the historical first-byte display even for malformed Key
+            // bodies; exact Key queries only use validated `keys`.
+            key: bodyLength >= 3 ? buf[begin + 10] : null,
+            keys: keyBody.keys, keysValid: keyBody.valid, bodyLength,
             seqLowLine: lowLine, seqLowOffset: lowOffset, seqHighLine: highLine, seqHighOffset: highOffset,
             hex: toHex(buf.subarray(begin, finish))});
           begin = finish;
@@ -440,6 +459,195 @@
             .some(v => String(v).toLowerCase().includes(q));
       });
     }
+    function queryByte(value, label) {
+      if (value == null || String(value).trim() === '') return null;
+      let n = value;
+      if (typeof value === 'string') {
+        const s = value.trim();
+        if (/^(?:0x)?[\da-f]{1,2}$/i.test(s)) n = parseInt(s.replace(/^0x/i, ''), 16);
+        else if (/^\d{3}$/.test(s)) n = Number(s);
+        else n = NaN;
+      }
+      if (!Number.isInteger(n) || n < 0 || n > 255) throw new Error(label + '必须是 00–FF 的一个字节。');
+      return n;
+    }
+    function packetEvidence(s) {
+      const anomalyPrefix = new Uint32Array(s.rows.length + 1);
+      const atRow = new Map(), events = [], gapsBySegment = new Map();
+      const kinds = new Set(['gap', 'reorder', 'duplicate', 'collision', 'uncertain', 'rollback']);
+      for (const e of s.events) {
+        if (!kinds.has(e.kind) || !Number.isInteger(e.index) || e.index < 0 || e.index >= s.rows.length) continue;
+        if (e.kind === 'gap') {
+          if (!gapsBySegment.has(e.segment)) gapsBySegment.set(e.segment, []);
+          gapsBySegment.get(e.segment).push({start: e.cycle * MOD + e.from,
+            end: e.cycle * MOD + e.to, event: e});
+        } else anomalyPrefix[e.index + 1]++;
+        if (!atRow.has(e.index)) atRow.set(e.index, []);
+        atRow.get(e.index).push(e.kind);
+        events.push(e);
+      }
+      for (let i = 0; i < s.rows.length; i++) anomalyPrefix[i + 1] += anomalyPrefix[i];
+      for (const ranges of gapsBySegment.values()) {
+        ranges.sort((a, b) => a.start - b.start);
+        let count = 0;
+        for (const range of ranges) {
+          range.before = count;
+          count += range.end - range.start + 1;
+        }
+      }
+      events.sort((a, b) => a.index - b.index);
+      return {anomalyPrefix, atRow, events, gapsBySegment};
+    }
+    function missingThrough(ranges, sequence) {
+      if (!ranges?.length) return 0;
+      let lo = 0, hi = ranges.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (ranges[mid].start <= sequence) lo = mid + 1;
+        else hi = mid;
+      }
+      if (!lo) return 0;
+      const last = ranges[lo - 1];
+      return last.before + Math.max(0, Math.min(last.end, sequence) - last.start + 1);
+    }
+    function packetInterval(previous, current, basis, evidence, source, includeEvents = false) {
+      if (previous === undefined && current === undefined) return {kind: 'start', otherPackets: 0, globalMissing: 0, anomalyCount: 0,
+        text: '本次查询的第一条匹配报文。', events: []};
+      if (!basis || !previous || !current || previous.segment !== current.segment ||
+          previous.connectionKey !== current.connectionKey || previous.index >= current.index ||
+          previous.ext >= current.ext) {
+        return {kind: 'unknown', otherPackets: 0, globalMissing: 0, anomalyCount: 0, events: [],
+          text: source === 'filtered' && !basis ? '无法将两条过滤报文唯一对应到原始日志，不能判断其间缺号。' :
+            '两条报文跨连接或分析段，或原文顺序无法对应；不比较跨段序号。'};
+      }
+      const otherPackets = current.index - previous.index - 1;
+      // Final gaps are numeric SEQ ranges, not reception-position events. A
+      // reordered frame can make the event's source row fall outside this pair.
+      const ranges = evidence.gapsBySegment.get(current.segment);
+      const globalMissing = missingThrough(ranges, current.ext - 1) - missingThrough(ranges, previous.ext);
+      const anomalyCount = evidence.anomalyPrefix[current.index + 1] - evidence.anomalyPrefix[previous.index + 1];
+      const events = [];
+      if (includeEvents) {
+        if (ranges) {
+          for (const range of ranges) {
+            if (range.start >= current.ext || events.length >= 6) break;
+            if (range.end <= previous.ext) continue;
+            const e = range.event;
+            events.push({id: e.id, kind: e.kind, label: title(e),
+              sid: e.sid, from: e.from, to: e.to, count: e.count, index: e.index});
+          }
+        }
+        let lo = 0, hi = evidence.events.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >>> 1;
+          if (evidence.events[mid].index <= previous.index) lo = mid + 1;
+          else hi = mid;
+        }
+        for (let i = lo; i < evidence.events.length && evidence.events[i].index <= current.index && events.length < 6; i++) {
+          const e = evidence.events[i];
+          if (e.kind === 'gap' && events.some(item => item.id === e.id)) continue;
+          events.push({id: e.id, kind: e.kind, label: title(e),
+            sid: e.sid, from: e.from, to: e.to, count: e.count, index: e.index});
+        }
+      }
+      return {kind: globalMissing ? 'gap' : 'continuous', otherPackets, globalMissing, anomalyCount, events,
+        text: globalMissing ? '完整原始日志在这两条报文之间最终缺 ' + globalMissing +
+          ' 个序号；缺失报文的 Command/Key 无法确定。' :
+          '完整原始日志在这两条报文之间无最终缺号；中间有 ' + otherPackets +
+          ' 条其他有效报文。' + (anomalyCount ? '另有 ' + anomalyCount + ' 项重复、乱序等异常。' : '')};
+    }
+    function queryPackets(data, options = {}) {
+      const source = options.side || options.source || (data.raw ? 'raw' : 'filtered');
+      const s = data[source];
+      if (!s?.rows) throw new Error('所选日志来源不存在。');
+      const command = queryByte(options.command, 'Command');
+      const key = queryByte(options.key, 'Key');
+      const commandOptions = [...new Set(s.rows.map(r => r.cmd).filter(n => n != null))].sort((a, b) => a - b);
+      const keyOptions = command == null ? [] : [...new Set(s.rows.filter(r => r.cmd === command && r.keysValid)
+        .flatMap(r => r.keys))].sort((a, b) => a - b);
+      const pageSize = Math.max(1, Math.min(100, Math.floor(Number(options.pageSize) || 50)));
+      const matchIndices = command == null ? [] : s.rows.filter(r => r.cmd === command &&
+        (key == null || r.keysValid && r.keys.includes(key))).map(r => r.index);
+      const total = matchIndices.length;
+      const page = Math.max(0, Math.min(Math.max(0, Math.ceil(total / pageSize) - 1), Math.floor(Number(options.page) || 0)));
+      const basis = source === 'raw' ? s : data.raw || null;
+      const evidence = basis ? packetEvidence(basis) : null;
+      let anchors = null;
+      if (source === 'filtered' && basis) {
+        anchors = new Map();
+        for (const r of basis.rows) {
+          const identity = r.t + '|' + r.hex;
+          anchors.set(identity, anchors.has(identity) ? null : r);
+        }
+      }
+      const basisRow = index => {
+        const row = s.rows[index];
+        return source === 'raw' ? row : anchors?.get(row.t + '|' + row.hex) || null;
+      };
+      let globalMissing = 0, otherPackets = 0, anomalyCount = 0, comparablePairs = 0, unknownPairs = 0;
+      const comparableRanges = new Map();
+      const intervalAt = (position, includeEvents = false) => {
+        if (position === 0) return packetInterval(undefined, undefined, basis, evidence, source);
+        return packetInterval(basisRow(matchIndices[position - 1]), basisRow(matchIndices[position]), basis, evidence, source, includeEvents);
+      };
+      for (let i = 1; i < matchIndices.length; i++) {
+        const interval = intervalAt(i);
+        if (interval.kind === 'unknown') unknownPairs++;
+        else {
+          comparablePairs++;
+          otherPackets += interval.otherPackets;
+          anomalyCount += interval.anomalyCount;
+          const previous = basisRow(matchIndices[i - 1]), current = basisRow(matchIndices[i]);
+          if (previous.ext + 1 < current.ext) {
+            if (!comparableRanges.has(current.segment)) comparableRanges.set(current.segment, []);
+            comparableRanges.get(current.segment).push({start: previous.ext + 1, end: current.ext - 1});
+          }
+        }
+      }
+      // Reordered matching packets can create overlapping numeric intervals.
+      // Merge them before counting final missing sequence IDs in the summary.
+      for (const [segment, intervals] of comparableRanges) {
+        intervals.sort((a, b) => a.start - b.start);
+        const merged = [];
+        for (const interval of intervals) {
+          if (merged.length && interval.start <= merged.at(-1).end + 1)
+            merged.at(-1).end = Math.max(merged.at(-1).end, interval.end);
+          else merged.push({...interval});
+        }
+        const gaps = evidence.gapsBySegment.get(segment);
+        for (const interval of merged)
+          globalMissing += missingThrough(gaps, interval.end) - missingThrough(gaps, interval.start - 1);
+      }
+      const kind = globalMissing ? 'gap' : unknownPairs || !comparablePairs ? 'unknown' : 'continuous';
+      const onlyFiltered = source === 'filtered' && !data.raw;
+      const continuity = {kind, globalMissing, otherPackets, anomalyCount, comparablePairs, unknownPairs,
+        text: command == null ? '先选择 Command，再查看报文和连续性。' : !total ?
+          '没有匹配的有效报文，无法分析连续性。' : onlyFiltered ?
+          '只有过滤日志；未显示的序号可能被正常过滤，无法据此判断丢包。' :
+          globalMissing ? '匹配报文之间的完整原始日志最终缺 ' + globalMissing +
+            ' 个序号；缺失报文属于哪个 Command/Key 未知。' +
+            (unknownPairs ? '另有 ' + unknownPairs + ' 处跨段或无法配对，未参与计算。' : '') :
+          unknownPairs ? '可比较的区间未发现全局缺号；另有 ' + unknownPairs +
+            ' 处跨连接、跨分析段或无法配对，不能判定整组连续。' :
+          !comparablePairs ? '匹配报文不足两条，暂无可比较区间。' :
+          '匹配报文之间的完整原始日志没有最终缺号；其间 ' + otherPackets + ' 条其他有效报文属于正常穿插。'};
+      const atRow = source === 'raw' ? evidence.atRow : packetEvidence(s).atRow;
+      const items = matchIndices.slice(page * pageSize, (page + 1) * pageSize).map((index, offset) => {
+        const r = s.rows[index], position = page * pageSize + offset;
+        // A gap in abFilter may be ordinary filtering; only raw gaps are
+        // suitable for this query's anomaly badge and continuity verdict.
+        const anomalies = (atRow.get(index) || []).filter(kind => source === 'raw' || kind !== 'gap');
+        return {source, index, line: r.line, endLine: r.endLine, t: r.t, time: timestamp(r.t),
+          sid: r.sid, sidHex: hexWord(r.sid), cmd: r.cmd, keys: r.keys, keysValid: r.keysValid,
+          matchedKeys: key == null ? r.keys : [key], segment: r.segment, cycle: r.cycle,
+          connection: r.connection, connectionKey: r.connectionKey,
+          anomalies, status: anomalies.length ? 'anomaly' : 'normal', between: intervalAt(position, true)};
+      });
+      const scopeNote = onlyFiltered ? '仅有过滤日志，筛选后的跳号不能作为丢包证据。' :
+        '筛选只定位报文；连续性按同一连接段内完整原始日志判断，全局缺号无法归属到所选 Command/Key。';
+      return {source, side: source, command, key, total, page, pageSize, items,
+        commandOptions, keyOptions, matchIndices, continuity, scopeNote};
+    }
     function sequenceSource(s, row) {
       if (!row) return [];
       return [[row.seqLowLine, row.seqLowOffset, 6], [row.seqHighLine, row.seqHighOffset, 7]].map(([line, offset, frameOffset]) => {
@@ -690,7 +898,7 @@
       return out;
     }
     return {parse, compare, summary, crc16, makeFrame, names, title, label, timestamp,connections:C.timeline,connectionLabels:C.labels,
-      selectEvents, detail, inspect, framesAtLine, logWindow, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource, packetTiming, timingText};
+      selectEvents, queryPackets, detail, inspect, framesAtLine, logWindow, chart, descriptions, exportParts, hexByte, hexWord, sequenceBytes, hexLabel, dualLabel, sequenceSource, packetTiming, timingText};
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = createEngine(require('./connections.js'));
   else { root.ABEngineFactory = createEngine; root.ABEngine = createEngine(root.ABConnections); }

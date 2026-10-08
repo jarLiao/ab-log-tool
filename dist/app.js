@@ -1,7 +1,7 @@
 /* The worker owns parsed logs; original Files can be archived locally. */
 (function () {
   'use strict';
-  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.5.1', $ = id => document.getElementById(id);
+  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.6.0', $ = id => document.getElementById(id);
   const sourceLabel=side=>({raw:'原始接收',filtered:'过滤之后',connection:'连接诊断'}[side]||side);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const num = value => Number(value || 0).toLocaleString('zh-CN');
@@ -18,6 +18,7 @@
   let mode = 'raw', inputMode = 'raw', selected = '', currentView = null, activeChart = {}, focused = true;
   let files = {raw: null, filtered: null,connection:null}, contextText = '', toastTimer, filterTimer, demo = false, started = 0;
   let inspection = null, logStates = [], detailKey = '', chartPoints = [];
+  let packetView = null, packetActiveQuery = null, packetQueryTicket = 0, packetQueryTimer = null;
   let archive = null, historyEntries = [], historyDelete = null, historyTicket = 0, taskTicket = 0;
   let historyWrite = Promise.resolve();
   const LOG_ROW_HEIGHT = 28;
@@ -63,6 +64,7 @@
   function resetWorkspace() {
     archive = null; $('historySaveStatus').textContent = ''; $('saveHistoryBtn').hidden = true;
     inspection = null; detailKey = ''; logStates = []; chartPoints = [];
+    resetPacketQuery(true);
     meta = null; selected = ''; currentView = null; contextText = ''; renderId++;
     $('workspace').hidden = true; $('welcome').hidden = false; $('exportBtn').disabled = true;
     document.querySelectorAll('[data-mode]').forEach(b => { b.disabled = true; });
@@ -218,6 +220,94 @@
     return {kind: $('kindFilter').value, query: $('search').value.trim(), command: $('commandFilter').value,
       from: t('timeFrom'), to: t('timeTo'), coverage: $('coverageFilter').value,connection:$('connectionFilter').value};
   }
+  function packetByte(value) {
+    const text = value.trim();
+    if (!text) return null;
+    const match = /^(?:0x)?([0-9a-f]{2})$/i.exec(text);
+    return match ? parseInt(match[1], 16) : NaN;
+  }
+  function packetCriteria() {
+    const command = packetByte($('packetCommand').value), key = packetByte($('packetKey').value);
+    if (command == null) return {error: key == null ? '' : '请先输入 Command，再输入 Key。'};
+    if (Number.isNaN(command)) return {error: 'Command 应为两位十六进制，例如 FB 或 0xFB。'};
+    if (Number.isNaN(key)) return {error: 'Key 应为两位十六进制，例如 02 或 0x02。'};
+    return {side: mode === 'pair' ? $('chartSide').value : mode, command, key};
+  }
+  function updatePacketHelp() {
+    const side = mode === 'pair' ? $('chartSide').value : mode;
+    $('packetSource').textContent = side === 'connections' ? '' : '查询来源：' + sourceLabel(side);
+    $('packetHelp').textContent = side === 'filtered' ?
+      (meta?.raw ? '过滤报文会对照原始日志中唯一匹配的完整帧；无法对应的区间标为待核对。筛选后的跳号不能直接算丢包。' :
+        '只有过滤日志时，未显示的报文可能被正常过滤，无法仅凭序号跳号判断丢包。') :
+      '输入两位十六进制 Command；Key 留空时查询该 Command 的所有有效报文。序号连续性按完整原始日志及连接分段判断。';
+  }
+  function resetPacketQuery(clearInputs = false) {
+    clearTimeout(packetQueryTimer); packetQueryTicket++; packetView = null; packetActiveQuery = null;
+    if (clearInputs) { $('packetCommand').value = ''; $('packetKey').value = ''; $('packetCommandOptions').innerHTML = ''; }
+    $('packetKeyOptions').innerHTML = '';
+    $('packetResults').hidden = true; $('packetVerdict').hidden = true;
+    $('packetVerdict').className = 'packet-verdict';
+    $('packetCount').textContent = '输入 Command 开始查询';
+  }
+  function packetBetweenText(between) {
+    if (!between) return '首条命中';
+    if (typeof between === 'string') return between;
+    if (between.text) return between.text;
+    if (between.description) return between.description;
+    return '查看完整日志';
+  }
+  function renderPacketQuery() {
+    const q = packetView;
+    if (!q) return;
+    $('packetSource').textContent = '查询来源：' + sourceLabel(q.source || packetActiveQuery?.side);
+    $('packetCount').textContent = num(q.total) + ' 条有效报文';
+    $('packetKeyOptions').innerHTML = (q.keyOptions || []).map(n => '<option value="' + E.hexByte(n) + '"></option>').join('');
+    const verdict = q.continuity || {kind: 'unknown', text: q.scopeNote || '当前数据不足以判断序号是否连续。'};
+    $('packetVerdict').hidden = false;
+    $('packetVerdict').className = 'packet-verdict ' + (['continuous','gap','unknown'].includes(verdict.kind) ? verdict.kind : 'unknown');
+    $('packetVerdict').textContent = verdict.text;
+    $('packetResults').hidden = false;
+    $('packetRows').innerHTML = q.items.map(item => {
+      const keys = (item.keys || []).map(E.hexByte).join('、') || '—';
+      const status = (item.anomalies || []).map(kind => '<span class="packet-abnormal">' + esc(q.source === 'filtered' && kind === 'gap' ? '过滤文件跳号' : E.names[kind] || kind) + '</span>').join('') +
+        (item.keysValid === false ? '<span class="packet-abnormal">Key 结构待核对</span>' : '');
+      return '<tr tabindex="0" data-packet-index="' + item.index + '" data-packet-source="' + esc(item.source || q.source) + '" aria-label="查看序号 ' + esc(item.sidHex || E.hexWord(item.sid)) + ' 的原文"><td class="mono"><strong>' + esc(item.sidHex || E.hexWord(item.sid)) + '</strong><small class="seq-secondary">DEC ' + num(item.sid) + '</small></td><td class="mono">' + (E.hexByte(item.cmd) || '—') + ' / ' + esc(keys) + status + '</td><td class="mono">' + esc(E.timestamp(item.t).slice(0, 23)) + '</td><td class="mono">L' + item.line + (item.endLine !== item.line ? '–L' + item.endLine : '') + '</td><td class="packet-between">' + esc(packetBetweenText(item.between)) + '</td></tr>';
+    }).join('');
+    $('packetEmpty').hidden = q.total > 0;
+    $('packetEmpty').textContent = '没有符合该 Command / Key 的有效报文。可换一个代码，或核对日志来源。';
+    const pages = Math.max(1, Math.ceil(q.total / q.pageSize));
+    $('packetFooter').textContent = q.total ? '第 ' + num(q.page * q.pageSize + 1) + '–' + num(Math.min(q.total, (q.page + 1) * q.pageSize)) + ' 条' : '0 条报文';
+    $('packetPageInfo').textContent = (q.page + 1) + ' / ' + pages;
+    $('packetPrev').disabled = q.page === 0; $('packetNext').disabled = q.page + 1 >= pages;
+  }
+  async function refreshPacketQuery(page = 0) {
+    if (!meta || mode === 'connections') return;
+    const ticket = ++packetQueryTicket, criteria = packetCriteria();
+    packetView = null; packetActiveQuery = null;
+    if (criteria.error !== undefined) {
+      $('packetResults').hidden = true;
+      $('packetCount').textContent = criteria.error ? '输入有误' : '输入 Command 开始查询';
+      $('packetVerdict').hidden = !criteria.error;
+      $('packetVerdict').className = 'packet-verdict unknown';
+      $('packetVerdict').textContent = criteria.error;
+      if (currentView) requestView();
+      return;
+    }
+    $('packetCount').textContent = '查询中…';
+    $('packetVerdict').hidden = true; $('packetResults').hidden = true;
+    try {
+      const result = await rpc('packetQuery', {query: {...criteria, page, pageSize: 40}});
+      if (ticket !== packetQueryTicket) return;
+      packetView = result; packetActiveQuery = criteria;
+      renderPacketQuery();
+      await requestView();
+    } catch (error) {
+      if (ticket !== packetQueryTicket || error.message === '已取消') return;
+      $('packetCount').textContent = '查询失败';
+      $('packetVerdict').hidden = false; $('packetVerdict').className = 'packet-verdict unknown';
+      $('packetVerdict').textContent = error.message;
+    }
+  }
   function clearFilters() {
     inspection = null;
     $('search').value = $('commandFilter').value = $('timeFrom').value = $('timeTo').value = $('connectionFilter').value = '';
@@ -235,10 +325,12 @@
   }
   async function changeMode(m) {
     mode = m; selected = ''; focused = true; activeChart = {side: m === 'filtered' ? 'filtered' : 'raw'};
+    resetPacketQuery(false);
     $('workspace').classList.toggle('connection-view',m==='connections');
     clearFilters();
     document.querySelectorAll('[data-mode]').forEach(b => { b.classList.toggle('active', b.dataset.mode === m); b.setAttribute('aria-pressed', String(b.dataset.mode === m)); });
-    $('chartPanel').hidden=m==='connections';$('connectionGuide').hidden=m!=='connections';$('pairSessions').hidden=m!=='pair';
+    $('chartPanel').hidden=m==='connections';$('packetPanel').hidden=m==='connections';$('connectionGuide').hidden=m!=='connections';$('pairSessions').hidden=m!=='pair';
+    updatePacketHelp();
     $('commandFilter').hidden=m==='connections';$('segmentSummary').hidden=true;
     $('search').placeholder=m==='connections'?'事件 / 状态码 / 连接编号 / L行号':'0x8404 / 33796 / L行号';
     const groups=m==='connections'?meta.connections.groups:m==='pair'?meta.pair.sessions.map(s=>({key:s.key,label:(s.connectionSource?sourceLabel(s.connectionSource)+' · ':'')+s.connection})):
@@ -267,6 +359,7 @@
     $('kindFilter').innerHTML = '<option value="all">全部' + (m === 'pair' ? '差异' : '异常') + '</option>' + kinds.map(k => '<option value="' + k + '">' + E.names[k] + '</option>').join('');
     const cmds = m === 'pair' ? [...new Set([...meta.raw.commands, ...meta.filtered.commands])].sort((a, b) => a - b) : meta[m].commands;
     $('commandFilter').innerHTML = '<option value="">全部命令</option>' + cmds.map(n => '<option value="' + n + '">' + E.hexByte(n) + '</option>').join('');
+    $('packetCommandOptions').innerHTML = cmds.map(n => '<option value="' + E.hexByte(n) + '"></option>').join('');
     let notices = [];
     $('segmentSummary').hidden = true;
     if (m === 'pair') {
@@ -309,13 +402,14 @@
     }
     $('qualityNote').hidden = !notices.length; $('qualityNote').textContent = notices.join(' ');
     await requestView();
+    if ($('packetCommand').value.trim()) await refreshPacketQuery();
   }
   async function requestView(extra = {}) {
     if (!meta) return;
     if (extra.move != null || extra.page != null) inspection = null;
     const ticket = ++renderId;
     try {
-      const view = await rpc('view', {mode, filter: currentFilter(), selected, inspection,
+      const view = await rpc('view', {mode, filter: currentFilter(), selected, inspection, packetQuery: packetActiveQuery,
         chart: {...activeChart, focus: focused}, ...extra});
       if (ticket !== renderId) return;
       currentView = view; selected = view.selected; inspection = view.inspection; activeChart = {side: view.chart.side, lo: view.chart.lo, hi: view.chart.hi};
@@ -554,6 +648,15 @@
         '</title><rect x="' + (x(p.index) - 12) + '" y="' + (y(p.sid) - 12) + '" width="24" height="24" fill="transparent"/>' +
         '<circle cx="' + x(p.index) + '" cy="' + y(p.sid) + '" r="' + (isSelected ? 5 : 3) + '" fill="' + (isSelected ? '#285cce' : '#fff') + '" stroke="#487bd2"/></g>';
     }
+    $('packetChartLegend').hidden = !packetActiveQuery || packetActiveQuery.side !== c.side;
+    for (const p of c.packetMatches || []) {
+      const xx = x(p.index), yy = y(p.sid), title = '查询命中 · 序号 ' + E.hexWord(p.sid) + ' · L' + p.line +
+        (p.count > 1 ? ' · 此处汇总 ' + p.count + ' 条，点击放大' : ' · 点击查看原文');
+      out += '<g class="chart-packet-match" data-packet-index="' + p.index + '" data-packet-lo="' + p.lo + '" data-packet-hi="' + p.hi + '" data-packet-count="' + p.count +
+        '" role="button" tabindex="0" aria-label="' + esc(title) + '"><title>' + esc(title) + '</title><rect class="hitbox" x="' + (xx - 12) + '" y="' + (yy - 12) +
+        '" width="24" height="24" fill="transparent"/><path d="M' + xx + ' ' + (yy - 6) + 'L' + (xx + 6) + ' ' + yy + 'L' + xx + ' ' + (yy + 6) + 'L' + (xx - 6) + ' ' + yy +
+        'Z" fill="#8b4cc5" stroke="#fff" stroke-width="1.5"/>' + (p.count > 1 ? '<text x="' + (xx + 8) + '" y="' + (yy - 7) + '" fill="#7743ad" font-size="11">' + p.count + '</text>' : '') + '</g>';
+    }
     const inspectedFrame = inspection?.source === c.side ? currentView.detail?.frame : null;
     if (inspectedFrame && inspectedFrame.index >= c.lo && inspectedFrame.index <= c.hi) {
       out += '<g class="chart-selection" pointer-events="none"><line x1="' + x(inspectedFrame.index) + '" x2="' + x(inspectedFrame.index) +
@@ -703,6 +806,31 @@
   $('kindFilter').onchange = $('commandFilter').onchange = $('connectionFilter').onchange = $('coverageFilter').onchange = $('timeFrom').onchange = $('timeTo').onchange = () => { inspection = null; selected = ''; requestView(); };
   $('search').oninput = () => { clearTimeout(filterTimer); filterTimer = setTimeout(() => { inspection = null; selected = ''; requestView(); }, 180); };
   $('resetFilter').onclick = () => { clearFilters(); selected = ''; requestView(); };
+  function schedulePacketQuery() {
+    clearTimeout(packetQueryTimer); packetQueryTicket++; packetView = null; packetActiveQuery = null;
+    $('packetResults').hidden = true; $('packetVerdict').hidden = true;
+    $('packetCount').textContent = $('packetCommand').value.trim() ? '等待查询…' : '输入 Command 开始查询';
+    packetQueryTimer = setTimeout(() => refreshPacketQuery(), 220);
+  }
+  $('packetCommand').oninput = schedulePacketQuery;
+  $('packetKey').oninput = schedulePacketQuery;
+  for (const id of ['packetCommand', 'packetKey']) $(id).onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(packetQueryTimer); refreshPacketQuery(); }
+  };
+  $('packetClear').onclick = () => { $('packetCommand').value = ''; $('packetKey').value = ''; resetPacketQuery(false); if (currentView) requestView(); $('packetCommand').focus(); };
+  $('packetPrev').onclick = () => refreshPacketQuery(packetView.page - 1);
+  $('packetNext').onclick = () => refreshPacketQuery(packetView.page + 1);
+  function inspectPacketRow(tr) {
+    if (!tr) return;
+    inspectRecord({source: tr.dataset.packetSource, index: Number(tr.dataset.packetIndex)}).then(() => {
+      $('detailTitle').tabIndex = -1; $('detailTitle').focus({preventScroll: true});
+      $('detailTitle').scrollIntoView({block: 'start'});
+    });
+  }
+  $('packetRows').addEventListener('click', e => inspectPacketRow(e.target.closest('[data-packet-index]')));
+  $('packetRows').addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); inspectPacketRow(e.target.closest('[data-packet-index]')); }
+  });
   $('moreFilter').onclick = () => { $('extraFilters').hidden = !$('extraFilters').hidden; $('moreFilter').setAttribute('aria-expanded', String(!$('extraFilters').hidden)); };
   $('eventRows').addEventListener('click', e => { const tr = e.target.closest('[data-id]'); if (tr) select(tr.dataset.id); });
   $('eventRows').addEventListener('keydown', e => {
@@ -710,6 +838,15 @@
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); requestView({move: e.key === 'ArrowDown' ? 1 : -1}).then(() => $('eventRows').querySelector('[data-id="' + selected + '"]')?.focus({preventScroll: true})); }
   });
   $('chart').addEventListener('click', e => {
+    const packet = e.target.closest('[data-packet-index]');
+    if (packet) {
+      const c = currentView.chart;
+      if (Number(packet.dataset.packetCount) > 1) {
+        focused = false; activeChart = {side: c.side, lo: Math.max(0, Number(packet.dataset.packetLo) - 3), hi: Math.min(c.total - 1, Number(packet.dataset.packetHi) + 3)};
+        requestView();
+      } else inspectRecord({source: c.side, index: Number(packet.dataset.packetIndex)});
+      return;
+    }
     const connection = e.target.closest('[data-connection-id]');
     if (connection) {
       const group = currentView.chart.connectionMarkers.find(g => g.id === connection.dataset.connectionId);
@@ -746,7 +883,7 @@
       e.preventDefault(); const c = currentView.chart, index = inspection?.source === c.side && inspection.index != null ? inspection.index : c.lo;
       inspectRecord({source: c.side, index: Math.max(0, Math.min(c.total - 1, index + (e.key === 'ArrowRight' ? 1 : -1)))}).then(() => $('chart').focus({preventScroll: true}));
     } else if (e.key === 'Enter' || e.key === ' ') {
-      const el = e.target.closest('[data-chart-id], [data-record-index], [data-connection-id]'); e.preventDefault();
+      const el = e.target.closest('[data-chart-id], [data-record-index], [data-connection-id], [data-packet-index]'); e.preventDefault();
       if (el) el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
       else if (currentView.chart.total) inspectRecord({source: currentView.chart.side, index: currentView.chart.lo});
     }
@@ -767,7 +904,11 @@
   $('pageNext').onclick = () => requestView({page: currentView.page + 1});
   $('focusBtn').onclick = () => { focused = true; requestView(); };
   $('fullBtn').onclick = () => { focused = false; activeChart = {side: $('chartSide').value}; requestView(); };
-  $('chartSide').onchange = () => { focused = false; activeChart = {side: $('chartSide').value}; requestView(); };
+  $('chartSide').onchange = () => {
+    focused = false; activeChart = {side: $('chartSide').value}; resetPacketQuery(false);
+    updatePacketHelp();
+    if ($('packetCommand').value.trim()) refreshPacketQuery(); else requestView();
+  };
   $('zoomIn').onclick = () => zoom(.5); $('zoomOut').onclick = () => zoom(2);
   $('chartPan').oninput = () => {
     const c = currentView.chart, span = c.hi - c.lo, lo = Math.round(Number($('chartPan').value) / 1000 * Math.max(0, c.total - 1 - span));
