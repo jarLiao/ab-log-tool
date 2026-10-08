@@ -29,6 +29,36 @@ async function importLogs(page, kind, files) {
   if (kind === 'pair') await page.locator('[data-mode="pair"]').click();
 }
 
+async function assertWorkbenchLayout(page, mobile = false) {
+  const layout = await page.evaluate(() => {
+    const box = selector => {
+      const rect = document.querySelector(selector).getBoundingClientRect();
+      return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height};
+    };
+    return {
+      packet: box('#packetPanel'),
+      results: box('.result-panel'),
+      inspector: box('.inspector'),
+      packetDirectlyBeforeWorkbench: document.querySelector('#packetPanel').nextElementSibling === document.querySelector('.workbench'),
+      viewport: innerWidth,
+      scrollWidth: document.documentElement.scrollWidth
+    };
+  });
+  assert.ok(layout.packet.height > 0, '报文查询卡片应可见');
+  assert.ok(layout.packetDirectlyBeforeWorkbench, '报文查询卡片应紧邻异常列表工作区上方');
+  assert.ok(layout.packet.bottom <= layout.results.top + 2, '报文查询卡片应位于异常列表上方且不覆盖');
+  assert.ok(layout.packet.right > layout.results.left && layout.packet.left < layout.results.right, '报文查询与异常列表应处于同一可见水平区域');
+  if (mobile) {
+    assert.ok(layout.scrollWidth <= layout.viewport + 1, '390px viewport must not overflow');
+    for (const [name, box] of [['报文查询', layout.packet], ['异常列表', layout.results], ['原文定位', layout.inspector]]) {
+      assert.ok(box.width > 250 && box.left >= -1 && box.right <= layout.viewport + 1, `${name}卡片在手机宽度下应完整可见`);
+    }
+  } else {
+    assert.ok(Math.abs(layout.results.top - layout.inspector.top) <= 2, '异常列表与原文定位应并排对齐');
+    assert.ok(Math.abs(layout.results.height - layout.inspector.height) <= 2, '异常列表与原文定位默认高度应一致');
+  }
+}
+
 (async () => {
   const browser = await chromium.launch({headless: true, executablePath: process.env.AB_BROWSER || 'C:/Program Files/Google/Chrome/Application/chrome.exe'});
   const page = await browser.newPage({viewport: {width: 1360, height: 950}});
@@ -45,6 +75,7 @@ async function importLogs(page, kind, files) {
     assert.match(await page.locator('#packetRows').innerText(), /中间有 1 条其他有效报文/);
     assert.equal(await page.locator('#packetRows tr').count(), 2);
     assert.equal(await page.locator('#chart .chart-packet-match').count(), 2);
+    await assertWorkbenchLayout(page);
     await page.locator('#packetPanel').screenshot({path: path.join(output, 'packet-query-desktop-1360.png')});
     await page.locator('#packetRows tr').last().click();
     await page.waitForFunction(() => document.querySelector('#detailTitle .seq-primary')?.textContent === '0x0066');
@@ -61,7 +92,9 @@ async function importLogs(page, kind, files) {
     await page.locator('#packetKey').fill('02');
     await page.waitForFunction(() => document.querySelector('#packetCount').textContent === '2 条有效报文');
     await page.setViewportSize({width: 390, height: 844});
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), '390px viewport must not overflow');
+    await assertWorkbenchLayout(page, true);
+    assert.ok(await page.locator('#packetCommand').isVisible(), '手机宽度下 Command 输入框应可见');
+    assert.ok(await page.locator('#packetRows tr').count() > 0, '手机宽度下查询结果应可见');
     await page.locator('#packetPanel').screenshot({path: path.join(output, 'packet-query-mobile-390.png')});
 
     await importLogs(page, 'pair', {raw, filtered});
@@ -87,7 +120,7 @@ async function importLogs(page, kind, files) {
     assert.match(await page.locator('#packetVerdict').innerText(), /只有过滤日志/);
     assert.ok(await page.locator('#packetVerdict').evaluate(el => el.classList.contains('unknown')));
     assert.deepEqual(errors, []);
-    process.stdout.write('报文查询 UI：Command/Key、多 Key、全量连续/缺号、配对、图表高亮、原文、错误态、390px、过滤限制均通过。\n');
+    process.stdout.write('报文查询 UI：Command/Key、多 Key、全量连续/缺号、配对、图表高亮、原文、错误态、卡片顺序与等高、390px、过滤限制均通过。\n');
   } finally {
     await browser.close();
   }

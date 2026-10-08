@@ -125,8 +125,9 @@ h2{font-size:20px}h3{font-size:15px}
 .packet-table tr[data-packet-index]:hover{background:#f6f9ff}
 .packet-table td.packet-between{max-width:360px;white-space:normal;min-width:180px;color:var(--muted)}
 .packet-abnormal{display:inline-block;margin-left:6px;padding:1px 5px;border-radius:4px;background:var(--orange-bg);color:var(--orange);font-size:11px}
-.workbench{display:grid;grid-template-columns:minmax(0,1.07fr) minmax(0,1fr);gap:15px;min-height:435px;align-items:start}
+.workbench{display:grid;grid-template-columns:minmax(0,1.07fr) minmax(0,1fr);gap:15px;min-height:435px;align-items:stretch}
 .result-panel{display:flex;flex-direction:column}
+@media(min-width:951px){.result-panel .table-wrap{height:auto;min-height:330px;flex:1}}
 .result-toolbar{display:flex;align-items:center;gap:8px;padding:3px 14px 12px;flex-wrap:wrap}
 .search{display:flex;align-items:center;border:1px solid var(--line);border-radius:6px;min-width:180px;flex:1;height:36px;padding:0 8px;color:var(--muted)}
 .search:focus-within{outline:2px solid #6b9ff4;outline-offset:1px}
