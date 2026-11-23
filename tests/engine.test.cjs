@@ -569,7 +569,7 @@ test('boundary exports separate signed observed change from hypothetical distanc
 });
 
 test('normal record inspection exposes its own command and key without adding anomalies', () => {
-  const s=parse([frame(100,[0x7b,3,0x11,0]),frame(101,[0x01,3,0x15,0])]);
+  const s=parse([frame(100,[0x7b,2,0x11,0]),frame(101,[0x01,2,0x15,0])]);
   const before=JSON.stringify(s.counts), inspected=E.inspect({raw:s},{source:'raw',index:1});
   assert.equal(inspected.detail.frame.sid,101); assert.equal(inspected.detail.frame.cmd,'0x01'); assert.equal(inspected.detail.frame.key,'0x15');
   assert.equal(inspected.detail.frame.index,1); assert.equal(inspected.detail.frame.total,2);
@@ -577,7 +577,7 @@ test('normal record inspection exposes its own command and key without adding an
 });
 
 test('line selection resolves all frames on one line and keeps fragmented frame identity', () => {
-  const a=frame(100),b=frame(101,[0x01,3,0x16,0]);
+  const a=frame(100),b=frame(101,[0x01,2,0x16,0]);
   const s=E.parse(base+','+a.slice(0,14)+'\nerror between fragments\n'+(base+1)+','+a.slice(14)+b);
   assert.deepEqual(E.framesAtLine(s,3).map(r=>r.sid),[100,101]);
   assert.equal(E.inspect({raw:s},{source:'raw',line:3,index:0}).detail.frame.sid,100);
@@ -585,6 +585,47 @@ test('line selection resolves all frames on one line and keeps fragmented frame 
   assert.equal(chosen.detail.frame.sid,101); assert.equal(chosen.detail.frame.key,'0x16');
   assert.deepEqual(chosen.detail.choices.map(r=>r.index),[0,1]);
   assert.equal(E.inspect({raw:s},{source:'raw',line:2}).detail.frame,null);
+});
+
+test('inspector decodes header and item offsets and maps spaced fragments to source bytes', () => {
+  const a = frame(0x8404, [0x7b, 2, 0x11, 0xba, 1, 0x12, 0, 0x13, 0xaa, 0xbb], 0x31);
+  const b = frame(0x8405, [0x7f, 1, 0]);
+  const raw = E.parse(base + ',de ' + a.slice(0, 14) + '\n# diagnostic\n' + (base + 1) + '，' +
+    (a.slice(14) + b).match(/../g).join(' '));
+  const get = index => E.inspect({raw}, {source: 'raw', line: 3, index}).detail.frame;
+  const first = get(0), second = get(1);
+  assert.equal(first.hex, a);
+  assert.deepEqual(first.sourceSpans, [
+    {line: 1, frameStart: 0, sourceStart: 1, length: 7},
+    {line: 3, frameStart: 7, sourceStart: 0, length: 11}
+  ]);
+  assert.deepEqual(second.sourceSpans, [{line: 3, frameStart: 0, sourceStart: 11, length: 11}]);
+  assert.match(first.fields.header[1].value, /0x31 · 版本 1 · 上报确认 1 · 错误 1/);
+  assert.match(first.fields.header[2].value, /0x000A · Payload 10 字节/);
+  assert.equal(first.fields.header[4].value, '0x8404 · DEC 33796');
+  assert.deepEqual(first.fields.items.map(item => item.map(({start, length}) => [start, length])), [
+    [[9, 1], [10, 1], [11, 1]], [[12, 1], [13, 1], [14, 0]], [[14, 1], [15, 1], [16, 2]]
+  ]);
+  assert.match(first.fields.items[0][1].value, /三轴加速度/);
+  assert.equal(first.fields.items[0][2].value, '0xBA · 1 字节');
+  assert.match(first.fields.items[2][0].value, /延至帧尾/);
+  assert.match(second.fields.items[0][1].value, /成功确认/);
+});
+
+test('inspector shows device log and unsupported or malformed payload bytes without assuming items', () => {
+  const raw = parse([frame(1, [0x81, 0xa5, 0x00, 0x01]), frame(2, [0x7b, 2, 0x11], 0xc0),
+    frame(3, [0x7b, 1, 0x11, 4, 0xff]), frame(4, [])]);
+  const get = index => E.inspect({raw}, {source: 'raw', index}).detail.frame;
+  const log = get(0), reserved = get(1), malformed = get(2), empty = get(3);
+  assert.deepEqual(log.fields.items, []);
+  assert.deepEqual([log.key, log.fields.payload[1].name, log.fields.payload[1].start, log.fields.payload[1].length], ['', '日志数据', 9, 3]);
+  assert.deepEqual(reserved.fields.items, []);
+  assert.equal(reserved.cmd, '');
+  assert.match(reserved.fields.payload[0].value, /预留位非零/);
+  assert.equal(malformed.fields.items.length, 1);
+  assert.deepEqual([malformed.fields.payload[1].start, malformed.fields.payload[1].length], [11, 2]);
+  assert.match(malformed.fields.payload[1].value, /Item 长度超出/);
+  assert.deepEqual(empty.fields.payload, []);
 });
 
 test('diagnostic, blank and corrupt rows clear the parsed fields instead of using a nearby frame', () => {

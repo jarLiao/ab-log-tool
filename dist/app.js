@@ -1,7 +1,7 @@
 /* The worker owns parsed logs; original Files can be archived locally. */
 (function () {
   'use strict';
-  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.7.2', $ = id => document.getElementById(id);
+  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.7.3', $ = id => document.getElementById(id);
   const sourceLabel=side=>({raw:'原始接收',filtered:'过滤之后',connection:'连接诊断'}[side]||side);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const num = value => Number(value || 0).toLocaleString('zh-CN');
@@ -544,32 +544,77 @@
     if (from >= to) return esc(text);
     return esc(text.slice(0, from - offset)) + '<mark class="raw-search-hit">' + esc(text.slice(from - offset, to - offset)) + '</mark>' + esc(text.slice(to - offset));
   }
-  function rawMarkup(line, anchors, sectionIndex, match) {
-    const ranges = anchors.filter(a => a.line === line.n).sort((a, b) => a.start - b.start);
-    let out = '', cursor = 0;
-    for (const a of ranges) {
-      out += rawSearchMarkup(line.text.slice(cursor, a.start), cursor, match) + '<mark class="seq-byte-mark" tabindex="-1" data-source-byte="' +
-        sectionIndex + ':' + a.frameOffset + '" title="序号' + a.role + ' · AB 帧内偏移 ' + a.frameOffset +
-        ' · 原文 L' + a.line + ' 第 ' + (a.start + 1) + '–' + a.end + ' 列">' +
-        rawSearchMarkup(line.text.slice(a.start, a.end), a.start, match) + '</mark>';
-      cursor = a.end;
+  const rawZones = [[0, 1, 'header', 'Preamble'], [1, 2, 'flag', 'Flag'], [2, 4, 'header', 'Length'],
+    [4, 6, 'header', 'CRC16'], [6, 7, 'header', 'SEQ 低字节'], [7, 8, 'header', 'SEQ 高字节'],
+    [8, Infinity, 'payload', 'Payload']];
+  function rawMarkup(line, state, match) {
+    const span = state.sourceSpans.get(line.n);
+    const text = line.text;
+    if (!span) return rawSearchMarkup(text, 0, match);
+    let i = /^\s*\d{10,16}\s*[,，]\s*/.exec(text)[0].length, nibble = 0, cursor = 0, out = '';
+    for (const [from, to, color, label] of rawZones) {
+      const start = Math.max(from, span.frameStart), end = Math.min(to, span.frameStart + span.length);
+      if (start >= end) continue;
+      const first = (span.sourceStart + start - span.frameStart) * 2;
+      const last = (span.sourceStart + end - span.frameStart) * 2 - 1;
+      let left = 0, right = 0;
+      for (; i < text.length; i++) {
+        if (/\s/.test(text[i])) continue;
+        if (nibble === first) left = i;
+        if (nibble++ === last) { right = ++i; break; }
+      }
+      const anchor = from === 6 || from === 7;
+      out += rawSearchMarkup(text.slice(cursor, left), cursor, match) +
+        '<span class="packet-source packet-' + color + (anchor ? ' seq-byte-mark" tabindex="-1" data-source-byte="' + state.index + ':' + from : '') +
+        '" title="' + label + ' · 偏移 ' + offsetLabel(start, end - start) + '">' +
+        rawSearchMarkup(text.slice(left, right), left, match) + '</span>';
+      cursor = right;
     }
-    return out + rawSearchMarkup(line.text.slice(cursor), cursor, match);
+    return out + rawSearchMarkup(text.slice(cursor), cursor, match);
   }
   function frameAnchor(frame, index) {
     if (!frame) return '<div class="sequence-anchor no-frame">本行无有效报文 · 序号 — · 命令 / Key — / —</div>';
-    const h = frame.header;
     return '<div class="sequence-anchor"><div class="sequence-map"><span>原文字节</span><strong class="mono source-value">' +
       frame.seqBytes + '</strong><span>→</span><strong class="mono">' + frame.sidHex + '</strong><span class="mono">DEC ' + frame.sid +
-      '</span><button class="byte-jump" data-locate-byte="' + index + ':6">定位字节</button></div><div class="frame-header">' +
-      [['帧头', h[0]], ['属性', h[1]], ['长度', h.slice(2, 4).join(' ')], ['CRC', h.slice(4, 6).join(' ')]].map(([label, value]) =>
-        '<span class="header-slot"><small>' + label + '</small><span class="mono">' + value + '</span></span>').join('') +
-      '<span class="header-slot sequence-slot"><small>序号 · 低 → 高</small><span class="sequence-byte-buttons">' +
-      frame.anchors.map(a => '<button class="mono" data-locate-byte="' + index + ':' + a.frameOffset + '" title="定位序号' + a.role +
-        '，原文 L' + a.line + ' 第 ' + (a.start + 1) + ' 列">' + a.value + '</button>').join('') +
-      '</span></span><span class="header-slot command-slot"><small>命令</small><strong class="mono">' + (frame.cmd || '—') +
-      '</strong></span><span class="header-slot key-slot"><small>Key</small><strong class="mono">' + (frame.key || '—') +
-      '</strong></span></div><div class="byte-caption">AB 第 7、8 字节 · 偏移 6、7 · 小端：低字节在前</div><div class="packet-timing">' + esc(E.timingText(frame.timing)) + '</div></div>';
+      '</span><button class="byte-jump" data-locate-byte="' + index + ':6">定位字节</button></div>' +
+      '<div class="packet-timing">' + esc(E.timingText(frame.timing)) + '</div></div>';
+  }
+  function offsetLabel(start, length) {
+    return length === 0 ? '—' : length === 1 ? String(start) : start + '–' + (start + length - 1);
+  }
+  function fieldRow(frame, field, color, index, name = field.name) {
+    const {start, length, value} = field;
+    const bytes = (from, count) => frame.hex.slice(from * 2, (from + count) * 2).toUpperCase().match(/../g)?.join(' ') || '—';
+    let source = '<code>' + bytes(start, Math.min(length, 12)) + '</code>';
+    if (length > 12) source = '<details class="field-bytes"><summary>' + source + ' … <span>展开全部</span></summary><code>' +
+      bytes(start, length) + '</code></details>';
+    if (start === 6) source = '<span class="sequence-byte-buttons">' + frame.anchors.map(a =>
+      '<button class="mono" data-locate-byte="' + index + ':' + a.frameOffset + '" title="定位序号' + a.role + ' · L' + a.line + '">' +
+      a.value + '</button>').join('') + '</span>';
+    const slot = name === 'Command' ? ' command-slot' : name === 'Item 1 Key' ? ' key-slot' : '';
+    return '<tr class="packet-' + color + slot + '"><th scope="row">' + esc(name) + '</th><td class="mono">' + offsetLabel(start, length) +
+      '</td><td class="packet-byte-cell">' + source + '</td><td>' + esc(value) + '</td></tr>';
+  }
+  const itemsPerPage = 6;
+  function itemRows(frame, page) {
+    const first = page * itemsPerPage;
+    return frame.fields.items.slice(first, first + itemsPerPage).map((item, i) => item.map(field =>
+      fieldRow(frame, field, 'payload', null, 'Item ' + (first + i + 1) + ' ' + field.name)).join('')).join('');
+  }
+  function packetInspector(frame, index) {
+    if (!frame) return '';
+    const {header, payload, items} = frame.fields;
+    const pagination = items.length <= itemsPerPage ? '' : '<div class="packet-item-pages"><button class="button compact" data-item-page="-1" disabled>上一组</button>' +
+      '<span aria-live="polite">Item 1–' + itemsPerPage + ' / ' + num(items.length) +
+      '</span><button class="button compact" data-item-page="1">下一组</button></div>';
+    return '<section class="packet-inspector" aria-label="报文字段解析"><h4>报文字段解析</h4><p>从帧首按 0 计数 · 多字节帧头字段按小端解码</p>' +
+      '<table class="packet-inspector-table"><thead><tr><th scope="col">字段</th><th scope="col">偏移</th><th scope="col">原始字节</th><th scope="col">解码值</th></tr></thead>' +
+      '<tbody><tr class="packet-header packet-group"><th colspan="4" scope="rowgroup">Header 帧头</th></tr>' +
+      header.map(field => fieldRow(frame, field, field.start === 1 ? 'flag' : 'header', index)).join('') +
+      '</tbody><tbody><tr class="packet-payload packet-group"><th colspan="4" scope="rowgroup">Payload' + (payload.length ? '' : ' · 0 字节') +
+      '</th></tr>' + payload.slice(0, 1).map(field => fieldRow(frame, field, 'payload', index)).join('') + '</tbody>' +
+      '<tbody class="packet-items">' + itemRows(frame, 0) + '</tbody><tbody>' +
+      payload.slice(1).map(field => fieldRow(frame, field, 'payload', index)).join('') + '</tbody></table>' + pagination + '</section>';
   }
   async function revealByte(target, scrollSection = false) {
     const [section, offset] = target.split(':').map(Number), state = logStates[section];
@@ -616,7 +661,7 @@
         (l.n === currentLine ? ' selected-line' : '') + (l.n === match?.line ? ' raw-search-line' : '') + (/error|reorder_skip/i.test(l.text) ? ' diagnostic' : '') +
         '" role="option" id="log-line-' + state.index + '-' + l.n + '" aria-posinset="' + l.n + '" aria-setsize="' + result.total +
         '" aria-selected="' + (l.n === currentLine) + '" tabindex="-1" data-log-line="' + l.n + '"><span class="ln">' + l.n +
-        '</span><code>' + rawMarkup(l, s.frame?.anchors || [], state.index, l.n === match?.line ? match : null) + '</code></div>').join('');
+        '</span><code>' + rawMarkup(l, state, l.n === match?.line ? match : null) + '</code></div>').join('');
       if (result.lines.some(l => l.n === currentLine)) state.code.setAttribute('aria-activedescendant', 'log-line-' + state.index + '-' + currentLine);
       else state.code.removeAttribute('aria-activedescendant');
       state.status.textContent = 'L' + first + '–L' + (first + result.lines.length - 1) + ' / 共 ' + num(result.total) + ' 行 · 点击行查看解析';
@@ -682,7 +727,7 @@
         (s.frame ? E.timingText(s.frame.timing) + '\n' : '') +
         s.lines.map(l => (l.n == null ? '' : 'L' + l.n + '  ') + l.text).join('\n')).join('\n\n');
     $('contextNote').textContent = '可滚动浏览完整文件，点击行同步更新解析；↑ / ↓ 选择相邻行，Home / End 到文件首尾。' +
-      (e.kind === 'gap' ? '缺号没有原始报文；黄色字节属于前后实际存在的报文。' : '点击序号低 / 高字节可跳到字段原文。');
+      (e.kind === 'gap' ? '颜色对应缺号区间前后的实际报文。' : '点击字段表中的序号字节可跳到对应原文。');
     const key = [e.id, e.source, e.line, d.selectedLine].join(':');
     if (key === detailKey && logStates.length && logStates[0].code.isConnected) return;
     detailKey = key;
@@ -691,12 +736,13 @@
       '<div class="log-toolbar"><label>行号 <input type="number" class="log-jump" min="1" max="' + s.totalLines + '" value="' + (d.selectedLine || s.line) + '" aria-label="跳转原文行号"></label>' +
       '<button data-log-action="jump">跳转</button><button data-log-action="start">首行</button><button data-log-action="end">末行</button><button data-log-action="selected">选中行</button></div>' +
       '<div class="code log-viewport" tabindex="0" role="listbox" aria-label="' + esc(s.name + ' 完整日志，可用上下方向键选择行') + '"><div class="log-canvas"><div class="log-window"></div></div></div>' +
-      '<div class="log-status"></div></section>').join('');
+      '<div class="log-status"></div>' + packetInspector(s.frame, index) + '</section>').join('');
     logStates = d.sections.map((s, index) => {
       const el = $('codeSections').querySelector('[data-log-section="' + index + '"]'), code = el.querySelector('.code');
       const height = Math.max(LOG_ROW_HEIGHT, Math.min(8000000, s.totalLines * LOG_ROW_HEIGHT));
       const state = {section: s, index, code, height, window: el.querySelector('.log-window'), status: el.querySelector('.log-status'), ticket: 0,
-        selectedLine: d.selectedLine || s.line, first: null};
+        selectedLine: d.selectedLine || s.line, first: null, itemPage: 0,
+        sourceSpans: new Map(s.frame?.sourceSpans.map(span => [span.line, span]))};
       const canvas = el.querySelector('.log-canvas'); canvas.style.height = height + 'px';
       canvas.style.minWidth = Math.max(code.clientWidth, (s.maxLineLength + 12) * 7.3) + 'px';
       if (options.position?.source === s.side) { code.scrollTop = options.position.top; code.scrollLeft = options.position.left; }
@@ -857,6 +903,17 @@
     if (button) { revealByte(button.dataset.locateByte, true); return; }
     const section = e.target.closest('[data-log-section]'), state = section && logStates[Number(section.dataset.logSection)];
     if (!state) return;
+    const itemPage = e.target.closest('[data-item-page]');
+    if (itemPage) {
+      const frame = state.section.frame, total = frame.fields.items.length;
+      state.itemPage += Number(itemPage.dataset.itemPage);
+      const start = state.itemPage * itemsPerPage;
+      section.querySelector('.packet-items').innerHTML = itemRows(frame, state.itemPage);
+      section.querySelector('.packet-item-pages span').textContent = 'Item ' + (start + 1) + '–' + Math.min(start + itemsPerPage, total) + ' / ' + num(total);
+      section.querySelector('[data-item-page="-1"]').disabled = state.itemPage === 0;
+      section.querySelector('[data-item-page="1"]').disabled = start + itemsPerPage >= total;
+      return;
+    }
     const action = e.target.closest('[data-log-action]')?.dataset.logAction;
     if (action) {
       const n = action === 'start' ? 1 : action === 'end' ? state.section.totalLines : action === 'selected' ? state.selectedLine : Number(section.querySelector('.log-jump').value);

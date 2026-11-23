@@ -8,7 +8,7 @@ const url=process.env.AB_PREVIEW_URL||'http://127.0.0.1:4178';
 const report={checks:[],errors:[],requests:[],performance:{}};
 const ok=(name,value=true)=>{assert.ok(value,name);report.checks.push(name);};
 const base=1800000000000,logLines=[];
-for(let i=0;i<2000;i++) logLines.push((base+i)+','+E.makeFrame(1000+i,[[0x7b,1,2][i%3],3,[0x11,0x12,0x15][i%3],i&255]),'diagnostic '+i,'');
+for(let i=0;i<2000;i++) logLines.push((base+i)+','+E.makeFrame(1000+i,[[0x7b,1,2][i%3],2,[0x11,0x12,0x15][i%3],i&255]),'diagnostic '+i,'');
 const normal={name:'normal-scroll.txt',mimeType:'text/plain',buffer:Buffer.from(logLines.join('\n'))};
 const expectSid=async(p,sid)=>p.waitForFunction(sid=>document.querySelector('#detailTitle .seq-primary')?.textContent===sid,sid);
 const sourceByteTexts=async p=>(await p.locator('.seq-byte-mark').allTextContents()).map(s=>s.toUpperCase());
@@ -33,6 +33,12 @@ async function load(p,file,mode='raw'){
     ok('Clicking a normal chart point selects its real packet, command and key',(await page.locator('.command-slot').innerText()).includes('0x02')&&(await page.locator('.key-slot').innerText()).includes('0x15'));
     await page.waitForFunction(()=>document.querySelectorAll('.seq-byte-mark').length===2);
     ok('Normal packet highlights only its actual SID bytes',JSON.stringify(await sourceByteTexts(page))===JSON.stringify(['ED','03']));
+    const headerFlag = page.locator('.packet-inspector-table .packet-flag');
+    ok('Flag appears at offset 1 and uses the same style as the original byte',
+      (await headerFlag.innerText()).includes('0x00 · 版本 0') &&
+      (await headerFlag.locator('td').first().innerText()) === '1' &&
+      await headerFlag.locator('.packet-byte-cell').evaluate(el => getComputedStyle(el).backgroundColor) ===
+        await page.locator('.packet-source.packet-flag').evaluate(el => getComputedStyle(el).backgroundColor));
     await page.locator('#recordNext').click();await expectSid(page,'0x03EE');
     ok('Packet navigation updates command/key and header together',(await page.locator('#fields').innerText()).includes('0x7B / 0x11')&&(await page.locator('.command-slot').innerText()).includes('0x7B'));
     await page.locator('#chart').focus();await page.keyboard.press('ArrowRight');await expectSid(page,'0x03EF');
@@ -75,13 +81,16 @@ async function load(p,file,mode='raw'){
       await page.screenshot({path:path.join(out,'inspection-'+width+'.png'),fullPage:true});
     }
     await page.setViewportSize({width:1440,height:1080});
-    const a=E.makeFrame(100),b=E.makeFrame(101,[1,3,0x16,0]);
+    const a=E.makeFrame(100,[0x7f,1,0]),b=E.makeFrame(101,[1,2,0x16,0]);
     const fragmented={name:'multi-frame.txt',mimeType:'text/plain',buffer:Buffer.from(base+','+a.slice(0,14)+'\nerror fragment\n'+(base+1)+','+a.slice(14)+b)};
     await load(page,fragmented);await page.locator('[data-log-line="3"]').click();await expectSid(page,'0x0064');
     await page.locator('#recordChoices').waitFor({state:'visible'});
     ok('One physical row exposes both reassembled frame choices',await page.locator('[data-record-choice]').count()===2);
     await page.locator('[data-record-choice="1"]').click();await expectSid(page,'0x0065');
     ok('Choosing the second same-line packet updates command/key and exact header',(await page.locator('.command-slot').innerText()).includes('0x01')&&(await page.locator('.key-slot').innerText()).includes('0x16'));
+    await page.waitForFunction(()=>document.querySelector('[data-log-line="3"] .packet-source.packet-payload')?.textContent==='01021600');
+    ok('Only the second frame is marked on the shared physical line',
+      (await page.locator('[data-log-line="3"] .packet-source').allTextContents()).join('') === b);
     await page.locator('#kindFilter').selectOption('duplicate');
     await page.waitForFunction(()=>document.querySelector('#detailTitle').textContent.includes('没有选中的记录'));
     ok('An empty anomaly filter clears frame choices and the previous parsing',!await page.locator('#recordChoices').isVisible()&&await page.locator('.command-slot').count()===0);
@@ -90,9 +99,23 @@ async function load(p,file,mode='raw'){
     await page.locator('[data-record-choice="0"]').click();await expectSid(page,'0x0064');
     await page.locator('[data-locate-byte="0:7"]').click();
     ok('Fragmented high-byte locator jumps to the correct line',await page.evaluate(()=>document.activeElement?.closest('.code-line').dataset.logLine==='3'));
+    ok('Fragmented frame highlights only its own bytes on both source lines',
+      (await page.locator('.packet-source').allTextContents()).join('') === a);
     await page.locator('[data-log-line="2"]').click();
     await page.waitForFunction(()=>document.querySelector('.no-frame'));
-    ok('A diagnostic between fragments never inherits that frame');
+    ok('A diagnostic between fragments never inherits that frame',
+      await page.locator('.packet-source,.packet-inspector').count()===0);
+    const largeValue = Array.from({length: 32}, (_, i) => i);
+    const manyItems = E.makeFrame(200,[0x7b,...Array.from({length:6},()=>[1,0x11]).flat(),33,0x12,...largeValue]);
+    await load(page,{name:'multi-item.txt',mimeType:'text/plain',buffer:Buffer.from(base+','+manyItems)});
+    await page.getByRole('button',{name:'下一组'}).click();
+    const finalValue = page.locator('.packet-items tr').filter({hasText:'Item 7 Value'});
+    ok('Item paging keeps the final value offset and full byte length',
+      (await finalValue.innerText()).includes('23–54') && (await finalValue.innerText()).includes('32 字节'));
+    await finalValue.locator('summary').click();
+    ok('Expanded values retain every raw byte',
+      await finalValue.locator('details > code').innerText() ===
+        manyItems.slice(46).toUpperCase().match(/../g).join(' '));
     if(process.env.AB_ROLLBACK_LOG){
       await load(page,process.env.AB_ROLLBACK_LOG);
       await page.waitForFunction(()=>document.querySelectorAll('.seq-byte-mark').length===4);

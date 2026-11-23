@@ -26,17 +26,19 @@
     const hexWord = n => n == null ? '' : '0x' + mod(n).toString(16).padStart(4, '0').toUpperCase();
     const sequenceBytes = n => n == null ? '' : hexByte(n & 255).slice(2) + ' ' + hexByte((n >>> 8) & 255).slice(2);
     const toHex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-    function readKeys(bytes, bodyStart, finish) {
+    function readKeys(bytes, bodyStart, finish, onItem) {
       // EV-07B 2.6: Key Length includes the Key byte. Match Android's
       // AbReceiveWindow.Kind.read, including its final zero-length extension.
       const keys = [];
       let offset = bodyStart + 1;
       if (offset >= finish) return {keys, valid: false};
       while (offset < finish) {
-        let length = bytes[offset];
+        const declared = bytes[offset];
+        let length = declared;
         if (length === 0) length = finish - offset - 1;
         if (length < 1 || offset + 1 + length > finish) return {keys: [], valid: false};
         keys.push(bytes[offset + 1]);
+        onItem?.(offset, declared, length, bytes[offset + 1]);
         offset += length + 1;
       }
       return {keys, valid: true};
@@ -172,7 +174,7 @@
             // Retain the historical first-byte display even for malformed Key
             // bodies; exact Key queries only use validated `keys`.
             key: bodyLength >= 3 ? buf[begin + 10] : null,
-            keys: keyBody.keys, keysValid: keyBody.valid, bodyLength,
+            keys: keyBody.keys, keysValid: keyBody.valid, bodyLength, sourceByteStart: absolute + begin - a.start,
             seqLowLine: lowLine, seqLowOffset: lowOffset, seqHighLine: highLine, seqHighOffset: highOffset,
             hex: toHex(buf.subarray(begin, finish))});
           begin = finish;
@@ -692,6 +694,63 @@
       return {source, side: source, command, key, total, page, pageSize, items,
         commandOptions, keyOptions, matchIndices, continuity, scopeNote};
     }
+    function sourceSpans(s, row) {
+      const spans = [];
+      const size = row.bodyLength + 8;
+      let frameStart = 0;
+      for (let line = row.line; line <= row.endLine && frameStart < size; line++) {
+        const available = sourceByteCount(s.lines[line - 1]);
+        if (!available) continue;
+        const sourceStart = line === row.line ? row.sourceByteStart : 0;
+        const length = Math.min(size - frameStart, available - sourceStart);
+        spans.push({line, frameStart, sourceStart, length});
+        frameStart += length;
+      }
+      return spans;
+    }
+    function packetFields(row) {
+      const flag = row.props;
+      const header = [
+        {name: 'Preamble', start: 0, length: 1, value: '0xAB · 帧起始'},
+        {name: 'Flag', start: 1, length: 1, value: hexByte(flag) + ' · 版本 ' + (flag & 15) +
+          ' · 上报确认 ' + ((flag >> 4) & 1) + ' · 错误 ' + ((flag >> 5) & 1) + ' · 预留位 ' + (flag >> 6)},
+        {name: 'Length', start: 2, length: 2, value: hexWord(row.bodyLength) + ' · Payload ' + row.bodyLength + ' 字节'},
+        {name: 'CRC16', start: 4, length: 2, value: '0x' + (row.hex.slice(10, 12) + row.hex.slice(8, 10)).toUpperCase() + ' · 校验通过'},
+        {name: 'TID / SEQ', start: 6, length: 2, value: hexWord(row.sid) + ' · DEC ' + row.sid}
+      ];
+      const payload = [], items = [];
+      const size = 8 + row.bodyLength;
+      const remainder = (name, start, description) => payload.push({name, start, length: size - start, value: description});
+      if (!row.bodyLength) return {header, payload, items};
+      if (flag & 0xc0) {
+        remainder('Payload', 8, row.bodyLength + ' 字节 · Flag 预留位非零，结构待核对');
+        return {header, payload, items};
+      }
+      const cmd = row.cmd;
+      const commandName = {0x7b: '内存操作', 0x7f: '响应命令', 0x81: '设备运行日志'}[cmd];
+      payload.push({name: 'Command', start: 8, length: 1, value: hexByte(cmd) + (commandName ? ' · ' + commandName : '')});
+      if (size === 9) return {header, payload, items};
+      if (cmd === 0x81) {
+        remainder('日志数据', 9, (row.bodyLength - 1) + ' 字节 · 设备运行日志原始数据');
+        return {header, payload, items};
+      }
+      const bytes = Uint8Array.from(row.hex.match(/../g), byte => parseInt(byte, 16));
+      let next = 9;
+      const {valid} = readKeys(bytes, 8, size, (start, declared, length, key) => {
+        const isAck = cmd === 0x7f && size === 11 && declared === 1 && key === 0 && !(flag & 0x20);
+        const name = cmd === 0x7b ? memoryKeyNames.get(key) : isAck ? '成功确认' : '';
+        items.push([
+          {name: 'Length', start, length: 1, value: declared ? length + ' 字节 · 含 Key' : '0 · Key 和 Value 延至帧尾'},
+          {name: 'Key', start: start + 1, length: 1, value: hexByte(key) + (name ? ' · ' + name : '')},
+          {name: 'Value', start: start + 2, length: length - 1,
+            value: length === 2 ? '0x' + bytes[start + 2].toString(16).padStart(2, '0').toUpperCase() + ' · 1 字节' :
+              (length - 1) + ' 字节' + (length > 2 ? ' · 按 Command / Key 解读' : '')}
+        ]);
+        next = start + 1 + length;
+      });
+      if (!valid) remainder('剩余 Payload', next, (size - next) + ' 字节 · Item 长度超出剩余数据');
+      return {header, payload, items};
+    }
     function sequenceSource(s, row) {
       if (!row) return [];
       return [[row.seqLowLine, row.seqLowOffset, 6], [row.seqHighLine, row.seqHighOffset, 7]].map(([line, offset, frameOffset]) => {
@@ -727,11 +786,15 @@
     }
     function frameInfo(s, row) {
       if (!row) return null;
+      const fields = packetFields(row);
+      const cmd = fields.payload[0]?.name === 'Command' ? hexByte(row.cmd) : '';
+      const firstKey = fields.items[0]?.[1].start;
       return {index: row.index, line: row.line, endLine: row.endLine, total: s.rows.length, sid: row.sid, sidHex: hexWord(row.sid), seqBytes: sequenceBytes(row.sid),
-        cmd: hexByte(row.cmd), key: hexByte(row.key), cycle: row.cycle, segment: row.segment, timing: packetTiming(s, row),
+        cmd, key: firstKey == null ? '' : '0x' + row.hex.slice(firstKey * 2, firstKey * 2 + 2).toUpperCase(),
+        cycle: row.cycle, segment: row.segment, timing: packetTiming(s, row),
         connection:row.connection,connectionKey:row.connectionKey,appConnection:row.appConnection,connectionEvidence:row.connectionEvidence,
-        length: row.bodyLength + 8, t: timestamp(row.t), hex: row.hex.slice(0, 512), truncated: row.hex.length > 512,
-        header: row.hex.slice(0, 16).toUpperCase().match(/../g), anchors: sequenceSource(s, row)};
+        length: row.bodyLength + 8, t: timestamp(row.t), hex: row.hex,
+        fields, sourceSpans: sourceSpans(s, row), anchors: sequenceSource(s, row)};
     }
     function context(s, start, end, radius = 5, anchorLines = []) {
       const lo = Math.max(1, start - radius), hi = Math.min(s.lines.length, end + radius);
@@ -768,10 +831,14 @@
       for(const ref of e.refs||[])if(ref.source!==e.source||ref.line!==e.line)add(ref.source,ref.line,ref.endLine,'同一事件的另一处原文',null);
       return {event: e, description: descriptions(e, data), sections, frame: sections[0].frame};
     }
+    function sourceByteCount(text) {
+      const m = /^(\d{10,16})\s*[,，]\s*(.*)$/.exec(text?.trim() || '');
+      const hex = m?.[2].replace(/\s/g, '') || '';
+      return hex.length % 2 || /[^\da-f]/i.test(hex) ? 0 : hex.length / 2;
+    }
     function framesAtLine(s, line) {
       // A diagnostic between two fragments is not part of their byte stream.
-      const m = /^\s*\d{10,16}\s*[,，]\s*([\da-f\s]+)$/i.exec(s.lines[line - 1] || '');
-      if (!m || m[1].replace(/\s/g, '').length % 2) return [];
+      if (!sourceByteCount(s.lines[line - 1])) return [];
       let lo = 0, hi = s.rows.length;
       while (lo < hi) { const mid = (lo + hi) >>> 1; if (s.rows[mid].endLine < line) lo = mid + 1; else hi = mid; }
       const matches = [];
