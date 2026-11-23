@@ -8,7 +8,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>AB 协议包格式 · AB 日志分析</title>
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./style.css?v=1.7.2">
+  <link rel="stylesheet" href="./style.css?v=1.7.2-structure">
 </head>
 <body>
   <main class="protocol-guide">
@@ -18,11 +18,56 @@
       <p>一帧由 <strong>8 字节帧头</strong>和 <strong>Length 字节的 Payload</strong> 组成。以下字节偏移从 0 开始，多字节帧头字段按小端读取。</p>
     </header>
     <nav class="protocol-nav" aria-label="协议说明目录">
+      <a href="#structure">整帧结构图</a>
       <a href="#header">帧头字段</a>
       <a href="#payload">Payload 结构</a>
       <a href="#example">逐字节示例</a>
       <a href="#log">在日志里怎么读</a>
     </nav>
+
+    <section id="structure" class="panel protocol-section" aria-labelledby="structure-title">
+      <h2 id="structure-title">整帧结构图</h2>
+      <figure class="packet-diagram" aria-labelledby="structure-caption">
+        <div class="packet-diagram-root"><strong>AB 协议包</strong><span>8 + Length 字节</span></div>
+        <div class="packet-diagram-branches">
+          <section class="packet-diagram-branch packet-diagram-header" aria-label="帧头结构">
+            <h3>Header 帧头 <span>固定 8 字节</span></h3>
+            <dl class="packet-diagram-fields packet-header-fields">
+              <div><dt>Preamble</dt><dd>1 字节</dd></div>
+              <div class="packet-field-detail"><dt>Flag</dt><dd>1 字节</dd></div>
+              <div><dt>Length</dt><dd>2 字节</dd></div>
+              <div><dt>CRC16</dt><dd>2 字节</dd></div>
+              <div><dt>TID / SEQ</dt><dd>2 字节</dd></div>
+            </dl>
+            <div class="packet-diagram-detail packet-flag-detail">
+              <h4>Flag 位定义 <span>1 字节</span></h4>
+              <dl class="packet-diagram-fields packet-flag-bits">
+                <div><dt>bit 7–6</dt><dd>预留</dd></div>
+                <div><dt>bit 5</dt><dd>错误标志</dd></div>
+                <div><dt>bit 4</dt><dd>上报确认</dd></div>
+                <div><dt>bit 3–0</dt><dd>协议版本</dd></div>
+              </dl>
+            </div>
+          </section>
+          <section class="packet-diagram-branch packet-diagram-payload" aria-label="通用 Payload 结构">
+            <h3>Payload <span>Length 字节</span></h3>
+            <dl class="packet-diagram-fields packet-payload-fields">
+              <div><dt>Command</dt><dd>1 字节</dd></div>
+              <div class="packet-field-detail"><dt>Item 0 … Item N−1</dt><dd>可含零个或多个 Item</dd></div>
+            </dl>
+            <div class="packet-diagram-detail packet-item-detail">
+              <h4>单个 Item <span>通用格式</span></h4>
+              <dl class="packet-diagram-fields packet-item-fields">
+                <div><dt>Length</dt><dd>1 字节</dd></div>
+                <div><dt>Key</dt><dd>1 字节</dd></div>
+                <div><dt>Value</dt><dd>可变长度</dd></div>
+              </dl>
+            </div>
+          </section>
+        </div>
+        <figcaption id="structure-caption">方框按报文中的顺序排列。Payload 分支展示采用 Item 结构的命令。</figcaption>
+      </figure>
+    </section>
 
     <section id="header" class="panel protocol-section" aria-labelledby="header-title">
       <h2 id="header-title">帧头字段</h2>

@@ -317,6 +317,36 @@ progress{width:100%;height:10px;accent-color:var(--blue);display:block;margin:25
 .protocol-section{padding:clamp(12px,3vw,24px);scroll-margin-top:12px}
 .protocol-section h2{margin-bottom:10px}
 .protocol-section code{font-family:Consolas,"Cascadia Mono",monospace;color:var(--ink)}
+.packet-diagram{margin:16px 0 0}
+.packet-diagram-root,.packet-diagram-branch h3,.packet-diagram-detail h4{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:3px 8px;padding:9px 10px}
+.packet-diagram-root{color:white;background:var(--ink);border-radius:7px}
+.packet-diagram-root span,.packet-diagram-branch h3 span,.packet-diagram-detail h4 span{font-size:12px;font-weight:400}
+.packet-diagram-branches{position:relative;padding-top:18px;display:grid;gap:12px}
+.packet-diagram-branches::before{content:"";position:absolute;top:0;left:50%;height:18px;border-left:1px solid #8799ae}
+.packet-diagram-branch{min-width:0;position:relative}
+.packet-diagram-branch h3{color:white;border-radius:7px 7px 0 0}
+.packet-diagram-header{--diagram-ink:#1849aa;--diagram-tint:#edf3ff;--diagram-line:#b8ccef;--diagram-detail:#fff3e4;--diagram-accent:#874308}
+.packet-diagram-payload{--diagram-ink:#126556;--diagram-tint:#e8f5f1;--diagram-line:#accfc4;--diagram-detail:#e8f5f1;--diagram-accent:#126556}
+.packet-diagram-branch h3{background:var(--diagram-ink)}
+.packet-diagram-fields{margin:0;display:grid;border:1px solid var(--diagram-line);border-top:0;border-radius:0 0 7px 7px;background:var(--diagram-tint)}
+.packet-diagram-fields>div{min-width:0;padding:8px 3px;text-align:center}
+.packet-diagram-fields>div+div{border-left:1px solid var(--diagram-line)}
+.packet-diagram-fields dt{font-size:clamp(11px,2vw,13px);font-weight:650;line-height:1.4;overflow-wrap:anywhere}
+.packet-diagram-fields dd{margin:4px 0 0;font-size:12px;color:var(--muted)}
+.packet-diagram-fields .packet-field-detail{box-shadow:inset 0 -3px var(--diagram-accent)}
+.packet-header-fields{grid-template-columns:1.2fr .65fr .9fr .85fr 1fr}
+.packet-payload-fields{grid-template-columns:minmax(90px,1fr) 2fr}
+.packet-diagram-detail{margin-top:10px}
+.packet-diagram-detail h4{margin:0;background:var(--diagram-detail);color:var(--diagram-accent);border-radius:7px 7px 0 0}
+.packet-diagram-detail dl{background:white;border-top:1px solid var(--diagram-line)}
+.packet-flag-bits{grid-template-columns:repeat(4,minmax(0,1fr))}
+.packet-item-fields{grid-template-columns:1fr 1fr 1.4fr}
+.packet-diagram figcaption{margin-top:10px;font-size:12px;color:var(--muted)}
+@media(min-width:720px){
+  .packet-diagram-branches{grid-template-columns:1.12fr 1fr;padding-top:24px;gap:16px}
+  .packet-diagram-branches::before{height:12px}
+  .packet-diagram-branches::after{content:"";position:absolute;top:11px;left:26%;right:24%;height:13px;border:1px solid #8799ae;border-bottom:0;border-radius:6px 6px 0 0;pointer-events:none}
+}
 .protocol-table{border-collapse:collapse;width:100%;margin-top:12px;text-align:left;table-layout:fixed}
 .protocol-table :is(th,td){padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
 .protocol-table thead th{background:var(--bg);color:var(--muted);font-weight:500}
