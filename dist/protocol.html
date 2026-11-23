@@ -8,7 +8,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>AB 协议包格式 · AB 日志分析</title>
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./style.css?v=1.7.2-structure">
+  <link rel="stylesheet" href="./style.css?v=1.7.2-example">
 </head>
 <body>
   <main class="protocol-guide">
@@ -96,21 +96,29 @@
 
     <section id="example" class="panel protocol-section" aria-labelledby="example-title">
       <h2 id="example-title">逐字节示例</h2>
-      <p>下面是一帧用于说明字段位置的收包确认示例。实际报文取值随命令和设备变化。</p>
-      <div id="protocolExample" class="protocol-frame" aria-label="完整示例报文字节">
-        <span><code>AB</code><small>起始</small></span>
-        <span><code>00</code><small>Flag</small></span>
-        <span><code>03 00</code><small>Length</small></span>
-        <span><code>08 C7</code><small>CRC16</small></span>
-        <span><code>04 84</code><small>TID / SEQ</small></span>
-        <span class="protocol-payload"><code>7F 01 00</code><small>Payload</small></span>
+      <p>这是一帧 11 字节的收包确认示例。取日志逗号后的十六进制内容，每两位是一字节，从偏移 0 开始对照。</p>
+      <p class="packet-example-original"><span>日志中的十六进制</span><code id="protocolExampleOriginal">ab00030008c704847f0100</code></p>
+      <div id="protocolExample" class="packet-example" aria-label="示例报文的原始字节、偏移和解码值">
+        <section class="packet-diagram-branch packet-diagram-header" aria-labelledby="example-header-title">
+          <h3 id="example-header-title">Header 帧头 <span>偏移 0–7</span></h3>
+          <dl class="packet-diagram-fields packet-example-fields packet-header-fields">
+            <div><dt>Preamble</dt><dd><span class="packet-example-offset">偏移 0</span><code class="packet-example-bytes">AB</code><span class="packet-example-value">0xAB<br>帧起始</span></dd></div>
+            <div class="packet-example-flag"><dt>Flag</dt><dd><span class="packet-example-offset">偏移 1</span><code class="packet-example-bytes">00</code><span class="packet-example-value">0x00<br>各位为 0</span></dd></div>
+            <div><dt>Length</dt><dd><span class="packet-example-offset">偏移 2–3</span><code class="packet-example-bytes">03 00</code><span class="packet-example-value">0x0003<br>3 字节</span></dd></div>
+            <div><dt>CRC16</dt><dd><span class="packet-example-offset">偏移 4–5</span><code class="packet-example-bytes">08 C7</code><span class="packet-example-value">0xC708<br>校验通过</span></dd></div>
+            <div><dt>TID / SEQ</dt><dd><span class="packet-example-offset">偏移 6–7</span><code class="packet-example-bytes">04 84</code><span class="packet-example-value">0x8404<br>33796<br>十进制</span></dd></div>
+          </dl>
+        </section>
+        <section class="packet-diagram-branch packet-diagram-payload" aria-labelledby="example-payload-title">
+          <h3 id="example-payload-title">Payload <span>偏移 8–10</span></h3>
+          <dl class="packet-diagram-fields packet-example-fields packet-example-payload">
+            <div><dt>Command</dt><dd><span class="packet-example-offset">偏移 8</span><code class="packet-example-bytes">7F</code><span class="packet-example-value">0x7F<br>响应命令</span></dd></div>
+            <div><dt>Item Length</dt><dd><span class="packet-example-offset">偏移 9</span><code class="packet-example-bytes">01</code><span class="packet-example-value">1 字节<br>仅包含 Key</span></dd></div>
+            <div><dt>Item Key</dt><dd><span class="packet-example-offset">偏移 10</span><code class="packet-example-bytes">00</code><span class="packet-example-value">0x00<br>成功确认</span></dd></div>
+          </dl>
+        </section>
       </div>
-      <ol>
-        <li><code>03 00</code> 按小端读为 <code>0x0003</code>，Payload 为 3 字节，整帧为 11 字节。</li>
-        <li><code>08 C7</code> 按小端读为 <code>0xC708</code>，是对 <code>7F 01 00</code> 计算出的 CRC16。</li>
-        <li><code>04 84</code> 按小端读为 <code>0x8404</code>，即十进制 <strong>33796</strong>。</li>
-        <li>Payload 的 <code>7F</code> 是 Command。<code>01 00</code> 是一个 Item，Length 为 1，Key 为 <code>00</code>，Value 长度为 0。</li>
-      </ol>
+      <p class="packet-example-note">按小端读 Length、CRC16 和 SEQ。CRC16 覆盖偏移 8–10 的 <code>7F 01 00</code>。本例的 Item Length 为 1，因此 Value 为 0 字节。</p>
     </section>
 
     <section id="log" class="panel protocol-section" aria-labelledby="log-title">

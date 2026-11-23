@@ -356,11 +356,24 @@ progress{width:100%;height:10px;accent-color:var(--blue);display:block;margin:25
 .protocol-section :is(ul,ol){padding-inline-start:1.5em;margin:10px 0 0}
 .protocol-section li+li{margin-top:6px}
 .protocol-note{background:var(--blue-soft);border-radius:7px;padding:9px 11px;margin-top:12px}
-.protocol-frame{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 14px}
-.protocol-frame span{background:var(--bg);border:1px solid var(--line);border-radius:7px;display:grid;gap:3px;padding:7px 9px;min-width:48px}
-.protocol-frame .protocol-payload{background:var(--blue-soft);border-color:var(--blue)}
-.protocol-frame code{font-size:15px;font-weight:700;white-space:nowrap}
-.protocol-frame small{color:var(--muted);font-size:12px}
+.packet-example-original{display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 12px;background:var(--bg);padding:8px 10px;border:1px solid var(--line);border-radius:7px;margin:12px 0;color:var(--muted)}
+.packet-example-original code{overflow-wrap:anywhere}
+.packet-example{display:grid;gap:12px}
+.packet-example-fields>div{padding:8px 4px}
+.packet-example .packet-header-fields{grid-template-columns:repeat(5,minmax(0,1fr))}
+.packet-example-payload{grid-template-columns:repeat(3,minmax(0,1fr))}
+.packet-example-fields dd{display:grid;justify-items:center;gap:4px}
+.packet-example-offset,.packet-example-bytes,.packet-example-value{display:block}
+.packet-example-offset{font-size:11px;color:var(--muted)}
+.packet-example-fields .packet-example-bytes{color:var(--diagram-ink);font-weight:700;font-size:14px;white-space:nowrap}
+.packet-example-fields .packet-example-flag{background:var(--diagram-detail)}
+.packet-example-flag .packet-example-bytes{color:var(--diagram-accent)}
+.packet-example-value{font-size:12px;line-height:1.4;color:var(--ink);overflow-wrap:anywhere}
+.packet-example-note{margin-top:10px;color:var(--muted);font-size:13px}
+@media(min-width:720px){
+  .packet-example{grid-template-columns:5fr 3fr;gap:16px}
+  .packet-example>.packet-diagram-branch{display:grid;grid-template-rows:auto 1fr}
+}
 .protocol-log-rows{margin:10px 0 14px}
 .protocol-log-rows dt{font-weight:600}
 .protocol-log-rows dd{margin:3px 0 10px;color:var(--muted)}
