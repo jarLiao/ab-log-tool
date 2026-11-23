@@ -772,3 +772,41 @@ if(process.env.AB_RAW_LOG && process.env.AB_FILTER_LOG) {
     assert.deepEqual(kinds(raw,'collision').map(e=>[e.sid,e.relatedLine,e.line]),[[33945,302,304]]);
   });
 }
+
+const time = 1795243451914;
+const row = (sequence, body) => `${time + sequence},${E.makeFrame(sequence, body)}`;
+
+test('classification counts CRC-valid AB frames and each validated 0x7B Key at most once per frame', () => {
+  const malformed = row(4, [0x7b, 6, 0x11]);
+  const badCrc = row(5, [0x81, 0x08, 0x02]).slice(0, -2) + '03';
+  const data = E.parse([
+    row(1, [0x7b, 1, 0x11, 1, 0x11, 1, 0x18]),
+    row(2, [0x81, 0x08, 0x02]), row(3, [0x7f, 1, 0]), malformed, badCrc
+  ].join('\n'));
+  const {packets} = E.summary(data).logTypes;
+  assert.equal(packets.deviceLogs, 1);
+  assert.equal(packets.memory, 2);
+  assert.deepEqual(packets.commands, [
+    {command: 0x7b, count: 2}, {command: 0x7f, count: 1}, {command: 0x81, count: 1}
+  ]);
+  assert.deepEqual(packets.memoryKeys, [
+    {key: 0x11, count: 1, meaning: '三轴加速度'}, {key: 0x18, count: 1, meaning: ''}
+  ]);
+  assert.equal(packets.memoryWithoutKeys, 1);
+});
+
+test('new and legacy diagnostics count physical lines once, without counting blank lines or inferred events', () => {
+  const data = E.parse([
+    '', `# ble_event ${time} | connection=1 | event=gatt | new state: 0 (DISCONNECTED)`,
+    `ble_event ${time}, connection=1, event=gatt`, `# ble_session ${time} | connection=2 | event=start`,
+    `# reorder_skip ${time} | from=1 | to=2`, `# record_event ${time} | event=stop`,
+    `# ab_frame_rejected ${time} | reason=CRC`, `ab_body_rejected ${time}, reason=KEY_LENGTH`,
+    `# simulated_upload_drop ${time} | seq=3`, `error 消息序号中断 ${time}, 当前 =4`,
+    '# 其他文字', row(1, [0x7b, 1, 0x11]), '', ''
+  ].join('\n'));
+  const summary = E.summary(data);
+  assert.equal(summary.logTypes.packets.deviceLogs, 0);
+  assert.equal(summary.diagnostics, 10);
+  assert.deepEqual(summary.logTypes.diagnostics, {gatt: 2, connection: 1, reorder: 1,
+    capture: 1, rejected: 2, simulatedDrop: 1, sequence: 1, other: 1});
+});

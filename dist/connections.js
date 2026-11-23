@@ -9,8 +9,14 @@
       connection_stopped:'连接已停止', error:'连接错误', mtu:'MTU 更新', adapter_state:'蓝牙状态',
       notification_ignored:'忽略旧连接通知', processing_error:'收包处理错误', gatt:'GATT 诊断'};
     const closing = new Set(['disconnected','link_loss','connection_failed','connection_stopped','retries_exhausted']);
-    function read(text, line, source) {
+    function diagnosticText(text) {
       const s = text.trim();
+      if (!s.startsWith('# ')) return s;
+      // 新版单列注释：逗号写为 " |"，原文的竖线与反斜杠分别写为 \| 和 \\。
+      return s.slice(2).replace(/\\([\\|])| \|/g, (match, escaped) => escaped === undefined ? ',' : escaped).trim();
+    }
+    function read(text, line, source) {
+      const s = diagnosticText(text);
       let m = /^(ble_session|ble_event|reorder_skip|record_event)\s+(\d{10,16})\s*,\s*(.*)$/.exec(s);
       if (m) {
         const fields = {};
@@ -36,7 +42,7 @@
         fields:{device:m[2].trim()},raw:s,structured:false,ordered:false,reason:'旧版连接记录：' + m[2] + m[3]};
     }
     function tracker(lines, side) {
-      const ordered = lines.some(s => /^\s*ble_session\s+\d+\s*,.*\bevent=(start|end)\b/.test(s));
+      const ordered = lines.some(s => /^\s*ble_session\s+\d+\s*,.*\bevent=(start|end)\b/.test(diagnosticText(s)));
       let epoch=0, serial=0, current=null, closed=false;
       const groups=[];
       const next=(e, evidence) => {

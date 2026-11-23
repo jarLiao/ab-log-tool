@@ -8,12 +8,12 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob:; script-src 'self'; worker-src blob:; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>AB 日志分析</title>
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./style.css?v=1.7.0">
-  <script src="./connections.js?v=1.7.0" defer></script>
-  <script src="./engine.js?v=1.7.0" defer></script>
-  <script src="./worker.js?v=1.7.0" defer></script>
-  <script src="./history.js?v=1.7.0" defer></script>
-  <script src="./app.js?v=1.7.0" defer></script>
+  <link rel="stylesheet" href="./style.css?v=1.7.1">
+  <script src="./connections.js?v=1.7.1" defer></script>
+  <script src="./engine.js?v=1.7.1" defer></script>
+  <script src="./worker.js?v=1.7.1" defer></script>
+  <script src="./history.js?v=1.7.1" defer></script>
+  <script src="./app.js?v=1.7.1" defer></script>
 </head>
 <body>
 <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -38,7 +38,7 @@
       <button class="navbtn" data-mode="connections" disabled><svg class="ico"><use href="#i-history"/></svg>连接时间线<span id="connectionCount" class="count">—</span></button>
     </nav>
     <div id="sourceNote" class="file-note">导入同一设备的日志，可附加连接诊断文件，按连接分段核对。</div>
-    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.7.0 · 网页工具</span></div>
+    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.7.1 · 网页工具</span></div>
   </aside>
   <main class="main">
     <header class="topbar">
@@ -59,6 +59,15 @@
       <div id="qualityNote" class="notice" role="status" aria-live="polite" hidden></div>
       <details id="segmentSummary" class="segment-summary" hidden><summary id="segmentSummaryTitle">查看分析段</summary><div class="segment-table"><table><thead><tr><th>分析段 / 连接</th><th>原文范围</th><th>序号起止（HEX，含正常回绕）</th><th>有效报文</th><th>段内缺号</th></tr></thead><tbody id="segmentRows"></tbody></table></div></details>
       <section id="stats" class="stats" aria-label="分析统计"></section>
+      <section id="logTypesPanel" class="panel log-types" aria-labelledby="logTypesTitle">
+        <div class="panel-head"><h3 id="logTypesTitle">日志分类统计</h3><span class="small">按整份文件统计</span></div>
+        <div id="logTypesOverview" class="log-types-content"></div>
+        <p id="logTypesDat" class="log-types-note" hidden>DAT 3.1.0.10 的「LOG FILE PARSE」只读取 0x81 设备运行日志。</p>
+        <details id="logTypesDetails" class="log-types-details" hidden>
+          <summary>查看分类明细</summary>
+          <div id="logTypesBreakdown" class="log-types-content"></div>
+        </details>
+      </section>
       <details id="pairSessions" class="segment-summary" hidden><summary>按连接核对两份日志</summary><div class="segment-table"><table><thead><tr><th>连接会话</th><th>双方都有</th><th>仅原始有</th><th>仅过滤有</th><th>有过滤决策证据</th></tr></thead><tbody id="pairSessionRows"></tbody></table></div></details>
       <section id="connectionGuide" class="panel connection-guide" hidden><h3>按事件时间查看连接过程</h3><p>链路已连接 → 连接已就绪 → 首次观察到有效报文。断开后可继续查看重试和恢复过程；点击事件定位原文。事件按日志时间展示，同一文件的源行保留真实记录顺序。</p><div id="recoverySummary"></div></section>
       <section id="chartPanel" class="panel chart-panel" aria-label="序号变化图">

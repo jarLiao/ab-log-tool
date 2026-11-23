@@ -1,7 +1,7 @@
 /* The worker owns parsed logs; original Files can be archived locally. */
 (function () {
   'use strict';
-  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.7.0', $ = id => document.getElementById(id);
+  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.7.1', $ = id => document.getElementById(id);
   const sourceLabel=side=>({raw:'原始接收',filtered:'过滤之后',connection:'连接诊断'}[side]||side);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const num = value => Number(value || 0).toLocaleString('zh-CN');
@@ -327,6 +327,57 @@
       if (b.dataset.stat) b.onclick = () => { clearFilters(); $('kindFilter').value = b.dataset.stat; selected = ''; requestView(); };
     });
   }
+  function renderLogTypes(viewMode) {
+    const sources = (viewMode === 'pair' ? ['raw', 'filtered'] : viewMode === 'connections' ?
+      ['raw', 'filtered', 'connection'] : [viewMode]).filter(side => meta[side]);
+    const files = sources.map(side => meta[side]);
+    const packets = files.map(file => file.logTypes.packets);
+    const hasProtocolFiles = sources.some(side => side !== 'connection');
+    const table = (label, rows) => '<table class="log-types-table" aria-label="' + esc(label) + '"><thead><tr>' +
+      '<th scope="col">类别</th>' + sources.map(side => '<th scope="col">' + sourceLabel(side) + '</th>').join('') +
+      '</tr></thead><tbody>' + rows.map(([name, values]) => '<tr><th scope="row">' + esc(name) + '</th>' +
+        values.map(value => '<td>' + (value == null ? '—' : num(value)) + '</td>').join('') + '</tr>').join('') + '</tbody></table>';
+    const packetValues = read => packets.map((packet, i) => sources[i] === 'connection' ? null : read(packet, i));
+    const overview = [];
+    if (hasProtocolFiles) {
+      overview.push(['设备运行日志 · 0x81（帧）', packetValues(p => p.deviceLogs)],
+        ['内存 / 传感器数据 · 0x7B（帧）', packetValues(p => p.memory)],
+        ['其他 AB 报文（帧）', packetValues((p, i) => files[i].counts.frames - p.deviceLogs - p.memory)]);
+    }
+    overview.push(['诊断文字（行）', files.map(file => file.diagnostics)]);
+    $('logTypesOverview').innerHTML = table('日志分类总览', overview);
+    $('logTypesDat').hidden = !hasProtocolFiles;
+
+    const detail = [];
+    const commands = [...new Set(packets.flatMap(p => p.commands.map(entry => entry.command)))];
+    commands.sort((a, b) => (a ?? 256) - (b ?? 256));
+    if (hasProtocolFiles && commands.length) {
+      const counts = packets.map(p => new Map(p.commands.map(entry => [entry.command, entry.count])));
+      detail.push('<h4>按 Command（帧）</h4>' + table('按 Command 统计', commands.map(command => [
+        E.hexByte(command) || '无 Command', packetValues((_, i) => counts[i].get(command) || 0)
+      ])));
+    }
+    const keys = new Map();
+    for (const packet of packets) for (const entry of packet.memoryKeys) keys.set(entry.key, entry.meaning);
+    if (hasProtocolFiles && (keys.size || packets.some(p => p.memoryWithoutKeys))) {
+      const counts = packets.map(p => new Map(p.memoryKeys.map(entry => [entry.key, entry.count])));
+      const keyRows = [...keys].sort(([a], [b]) => a - b).map(([key, meaning]) => [
+        E.hexByte(key) + (meaning ? ' · ' + meaning : ' · 含义待核对'),
+        packetValues((_, i) => counts[i].get(key) || 0)
+      ]);
+      if (packets.some(p => p.memoryWithoutKeys)) keyRows.push(['Key 结构待核对', packetValues(p => p.memoryWithoutKeys)]);
+      detail.push('<h4>0x7B 的 Key（帧）</h4>' + table('按 0x7B 的 Key 统计', keyRows) +
+        '<p class="small">同一帧含多个不同 Key 时，各 Key 分别计入该帧。Key 含义按通用协议标注。</p>');
+    }
+    const diagnosticLabels = {gatt: 'GATT 诊断', connection: '连接与会话事件', reorder: '重排决策',
+      capture: '采集事件', rejected: '报文拒收', simulatedDrop: '模拟丢弃', sequence: '序号中断记录', other: '其他诊断文字'};
+    const diagnostics = Object.entries(diagnosticLabels).map(([key, label]) => [label,
+      files.map(file => file.logTypes.diagnostics[key] || 0)]).filter(([, values]) => values.some(Boolean));
+    if (diagnostics.length) detail.push('<h4>诊断文字（行）</h4>' + table('诊断文字分类', diagnostics));
+    $('logTypesBreakdown').innerHTML = detail.join('');
+    $('logTypesDetails').hidden = !detail.length;
+    $('logTypesDetails').open = false;
+  }
   async function changeMode(m) {
     mode = m; selected = ''; focused = true; activeChart = {side: m === 'filtered' ? 'filtered' : 'raw'};
     resetPacketQuery(false);
@@ -336,6 +387,7 @@
     clearFilters();
     document.querySelectorAll('[data-mode]').forEach(b => { b.classList.toggle('active', b.dataset.mode === m); b.setAttribute('aria-pressed', String(b.dataset.mode === m)); });
     $('chartPanel').hidden=m==='connections';$('packetPanel').hidden=m==='connections';$('connectionGuide').hidden=m!=='connections';$('pairSessions').hidden=m!=='pair';
+    renderLogTypes(m);
     updatePacketHelp();
     $('commandFilter').hidden=m==='connections';$('segmentSummary').hidden=true;
     $('search').placeholder=m==='connections'?'事件 / 状态码 / 连接编号 / L行号':'0x8404 / 33796 / L行号';

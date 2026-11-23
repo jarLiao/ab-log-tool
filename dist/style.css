@@ -71,6 +71,23 @@ h2{font-size:20px}h3{font-size:15px}
 .stat.special .stat-num{color:var(--purple)}
 .panel{background:white;border:1px solid var(--line);border-radius:var(--radius);min-width:0;overflow:hidden}
 .panel-head{display:flex;align-items:center;justify-content:space-between;padding:14px 17px 10px;gap:10px;flex-wrap:wrap}
+.log-types-content,.log-types-note{margin:0 17px 12px}
+.log-types-table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
+.log-types-table th,.log-types-table td{padding:7px 8px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.log-types-table thead th{background:var(--bg);color:var(--muted);font-weight:500}
+.log-types-table th:first-child{width:43%;text-align:left}
+.log-types-table th:first-child:nth-last-child(2){width:68%}
+.log-types-table tbody th{font-weight:500}
+.log-types-table th:not(:first-child),.log-types-table td{text-align:right;font-variant-numeric:tabular-nums}
+.log-types-note{color:var(--muted);font-size:13px}
+.log-types-details{border-top:1px solid var(--line)}
+.log-types-details summary{min-height:44px;cursor:pointer;padding:12px 0;margin:0 17px;color:var(--blue)}
+.log-types-details h4{font-size:13px;margin:12px 0 5px}
+.log-types-details .small{margin-top:6px}
+@media(max-width:650px){
+  .log-types-content,.log-types-note,.log-types-details summary{margin-inline:12px}
+  .log-types-table th,.log-types-table td{padding-inline:5px}
+}
 .head-inline{display:flex;align-items:center;gap:11px}
 .segmented{display:flex;border:1px solid var(--line);border-radius:6px;padding:2px;background:#f7f9fc}
 .segmented button{background:none;border:0;border-radius:4px;padding:5px 9px;color:var(--muted);font-size:12px;min-height:30px}

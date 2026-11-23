@@ -41,6 +41,43 @@
       }
       return {keys, valid: true};
     }
+    // EV-W101 general protocol, Memory operation (0x7B), Key list.
+    const memoryKeyNames = new Map([
+      [0x01, '外部 Flash 写入'], [0x02, '外部 Flash 读取'], [0x03, '外部 Flash CRC32'],
+      [0x08, '读取内部内存'], [0x10, '传感器数据上报设置'],
+      [0x11, '三轴加速度'], [0x12, '三轴陀螺仪'], [0x13, '磁力计数据'],
+      [0x14, 'PPG 原始数据'], [0x15, '气压计数据'], [0x16, '温度数据'], [0x17, '电量计数据'],
+      [0x80, '心率测量数据'], [0x81, '血氧测量数据'], [0x82, 'HRV 测量数据'], [0x83, '跌倒事件']
+    ]);
+    function diagnosticType(text, diagnostic) {
+      if (diagnostic?.event === 'gatt' || diagnostic?.fields?.event === 'gatt') return 'gatt';
+      if (diagnostic?.kind === 'connection') return 'connection';
+      if (diagnostic?.skip) return 'reorder';
+      if (/^(?:#\s+)?record_event\b/.test(text)) return 'capture';
+      if (/^(?:#\s+)?(?:ab_frame_rejected|ab_body_rejected)\b/.test(text)) return 'rejected';
+      if (/^(?:#\s+)?simulated_upload_drop\b/.test(text)) return 'simulatedDrop';
+      if (/^(?:#\s+)?error 消息序号中断/.test(text)) return 'sequence';
+      return 'other';
+    }
+    function packetTypes(rows) {
+      const commands = new Map(), memoryKeys = new Map();
+      let memoryWithoutKeys = 0;
+      for (const row of rows) {
+        commands.set(row.cmd, (commands.get(row.cmd) || 0) + 1);
+        if (row.cmd !== 0x7b) continue;
+        if (!row.keysValid) { memoryWithoutKeys++; continue; }
+        for (const key of new Set(row.keys)) memoryKeys.set(key, (memoryKeys.get(key) || 0) + 1);
+      }
+      return {
+        deviceLogs: commands.get(0x81) || 0,
+        memory: commands.get(0x7b) || 0,
+        commands: [...commands].sort(([a], [b]) => (a ?? 256) - (b ?? 256))
+          .map(([command, count]) => ({command, count})),
+        memoryKeys: [...memoryKeys].sort(([a], [b]) => a - b)
+          .map(([key, count]) => ({key, count, meaning: memoryKeyNames.get(key) || ''})),
+        memoryWithoutKeys
+      };
+    }
     function makeFrame(sid, body = [0x7b, 3, 0x12, 0], props = 0) {
       const bytes = Uint8Array.from([0xab, props, body.length & 255, body.length >>> 8, 0, 0, sid & 255, sid >>> 8, ...body]);
       const c = crc16(bytes, 8);
@@ -58,6 +95,12 @@
       const lines = text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/);
       if (lines.at(-1) === '') lines.pop();
       const result = {name, side, lines, rows: [], events: [], diagnostics: 0, dataLines: 0, wraps: 0, segments: 0, maxLineLength: 0};
+      result.diagnosticTypes = {};
+      function countDiagnostic(text, diagnostic) {
+        const type = diagnosticType(text, diagnostic);
+        result.diagnosticTypes[type] = (result.diagnosticTypes[type] || 0) + 1;
+        result.diagnostics++;
+      }
       const connections=C.tracker(lines,side);
       result.connectionEvents=[];result.skipRecords=[];result.connectionGroups=connections.groups;
       result.orderedSessions=connections.ordered;
@@ -156,7 +199,7 @@
         if (s) {
           const diagnostic=C.read(s,i+1,side);
           if(diagnostic){
-            result.diagnostics++;
+            countDiagnostic(s, diagnostic);
             if(diagnostic.skip)result.skipRecords.push(diagnostic);
             if(diagnostic.kind){
               if(connections.accept(diagnostic))drain(true);
@@ -170,7 +213,7 @@
             continue;
           }
           const match = /^(\d{10,16})\s*[,，]\s*(.*)$/.exec(s);
-          if (!match) result.diagnostics++;
+          if (!match) countDiagnostic(s, null);
           else {
             result.dataLines++;
             const h = match[2].replace(/\s+/g, '');
@@ -426,6 +469,7 @@
     function summary(s) {
       return {name: s.name, side: s.side, bytes: s.bytes, encoding: s.encoding, counts: s.counts,
         lineCount: s.lines.length, maxLineLength: s.maxLineLength, diagnostics: s.diagnostics, dataLines: s.dataLines,
+        logTypes: {packets: packetTypes(s.rows), diagnostics: s.diagnosticTypes},
         minTime: s.minTime, maxTime: s.maxTime, firstSid: s.rows[0]?.sid ?? null, lastSid: s.rows.at(-1)?.sid ?? null,
         wraps: s.wraps, segments: s.segments, segmentRanges: s.segmentRanges,connectionCount:s.connectionCount,
         connectionEvents:s.connectionEvents.length,associationNote:s.associationNote,unassociatedRanges:s.unassociatedRanges};
