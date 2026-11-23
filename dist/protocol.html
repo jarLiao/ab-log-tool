@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="AB 协议包格式、字节偏移和完整样例。适用于核对 AndroidTool 的 AB 日志。">
+  <meta name="color-scheme" content="light">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>AB 协议包格式 · AB 日志分析</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./style.css?v=1.7.2">
+</head>
+<body>
+  <main class="protocol-guide">
+    <header class="protocol-hero">
+      <a class="button protocol-back" href="./index.html">返回 AB 日志分析</a>
+      <h1>AB 协议包格式</h1>
+      <p>一帧由 <strong>8 字节帧头</strong>和 <strong>Length 字节的 Payload</strong> 组成。以下字节偏移从 0 开始，多字节帧头字段按小端读取。</p>
+    </header>
+    <nav class="protocol-nav" aria-label="协议说明目录">
+      <a href="#header">帧头字段</a>
+      <a href="#payload">Payload 结构</a>
+      <a href="#example">逐字节示例</a>
+      <a href="#log">在日志里怎么读</a>
+    </nav>
+
+    <section id="header" class="panel protocol-section" aria-labelledby="header-title">
+      <h2 id="header-title">帧头字段</h2>
+      <table class="protocol-table">
+        <thead><tr><th scope="col">字节偏移</th><th scope="col">字段</th><th scope="col">如何读取</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><th scope="row">Preamble</th><td>帧起始字节，固定为 <code>AB</code>。</td></tr>
+          <tr><td>1</td><th scope="row">Flag</th><td>低 4 位为协议版本，bit 4 为上报确认标志，bit 5 为错误标志，bit 6–7 预留。</td></tr>
+          <tr><td>2–3</td><th scope="row">Length</th><td>Payload 字节数。整帧字节数为 <code>8 + Length</code>。</td></tr>
+          <tr><td>4–5</td><th scope="row">CRC16</th><td>对整个 Payload 计算，覆盖偏移 8 到帧末尾。分析器使用多项式 <code>0x1021</code>，初值 <code>0x0000</code>。</td></tr>
+          <tr><td>6–7</td><th scope="row">TID / SEQ</th><td>16 位流水号，分析页标为 SEQ。对应回复使用同一个 TID。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="payload" class="panel protocol-section" aria-labelledby="payload-title">
+      <h2 id="payload-title">Payload 结构</h2>
+      <p><strong>偏移 8 是 Command</strong>，表示这一帧的命令类型。采用通用 Item 结构的命令，后面可有零个或多个 <code>Length · Key · Value</code>。</p>
+      <ul>
+        <li>Item 的 Length 占 1 字节，包含 Key 和 Value。因此 Value 占 <code>Length − 1</code> 字节。</li>
+        <li>Key 占 1 字节，含义由 Command 和设备协议决定。例如 <code>0x7B / 0x11</code> 是三轴加速度。</li>
+        <li>Item 的 Length 为 <code>00</code> 时，Key 后的剩余字节全部属于这个 Item 的 Value。</li>
+      </ul>
+      <p class="protocol-note">设备运行日志 <code>0x81</code> 的 Command 后携带设备日志数据，按对应的日志格式解析。</p>
+    </section>
+
+    <section id="example" class="panel protocol-section" aria-labelledby="example-title">
+      <h2 id="example-title">逐字节示例</h2>
+      <p>下面是一帧用于说明字段位置的收包确认示例。实际报文取值随命令和设备变化。</p>
+      <div id="protocolExample" class="protocol-frame" aria-label="完整示例报文字节">
+        <span><code>AB</code><small>起始</small></span>
+        <span><code>00</code><small>Flag</small></span>
+        <span><code>03 00</code><small>Length</small></span>
+        <span><code>08 C7</code><small>CRC16</small></span>
+        <span><code>04 84</code><small>TID / SEQ</small></span>
+        <span class="protocol-payload"><code>7F 01 00</code><small>Payload</small></span>
+      </div>
+      <ol>
+        <li><code>03 00</code> 按小端读为 <code>0x0003</code>，Payload 为 3 字节，整帧为 11 字节。</li>
+        <li><code>08 C7</code> 按小端读为 <code>0xC708</code>，是对 <code>7F 01 00</code> 计算出的 CRC16。</li>
+        <li><code>04 84</code> 按小端读为 <code>0x8404</code>，即十进制 <strong>33796</strong>。</li>
+        <li>Payload 的 <code>7F</code> 是 Command。<code>01 00</code> 是一个 Item，Length 为 1，Key 为 <code>00</code>，Value 长度为 0。</li>
+      </ol>
+    </section>
+
+    <section id="log" class="panel protocol-section" aria-labelledby="log-title">
+      <h2 id="log-title">在日志里怎么读</h2>
+      <dl class="protocol-log-rows">
+        <dt><code>毫秒时间戳,十六进制报文</code></dt>
+        <dd>时间戳记录接收时间，从逗号后的十六进制数据开始数协议字节。分析页可以定位帧头里的 SEQ 字节。</dd>
+        <dt><code># ble_event … | …</code></dt>
+        <dd>这是 App 记录的蓝牙诊断文字，在「日志分类统计」中按行计数。</dd>
+      </dl>
+      <p>用 DAT 3.1.0.10 的「LOG FILE PARSE」前，可先看「日志分类统计」中的 <code>0x81</code> 数量。若为 0，该入口没有设备日志可以显示。<code>0x7B</code> 报文可以在本网页用 Command／Key 查询。</p>
+    </section>
+  </main>
+</body>
+</html>

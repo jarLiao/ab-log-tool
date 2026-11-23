@@ -1,7 +1,7 @@
 /* The worker owns parsed logs; original Files can be archived locally. */
 (function () {
   'use strict';
-  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.7.1', $ = id => document.getElementById(id);
+  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.7.2', $ = id => document.getElementById(id);
   const sourceLabel=side=>({raw:'原始接收',filtered:'过滤之后',connection:'连接诊断'}[side]||side);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const num = value => Number(value || 0).toLocaleString('zh-CN');
