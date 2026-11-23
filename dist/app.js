@@ -1,7 +1,7 @@
 /* The worker owns parsed logs; original Files can be archived locally. */
 (function () {
   'use strict';
-  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.7.3', $ = id => document.getElementById(id);
+  const E = window.ABEngine, H = window.ABHistory, VERSION = '1.7.4', $ = id => document.getElementById(id);
   const sourceLabel=side=>({raw:'原始接收',filtered:'过滤之后',connection:'连接诊断'}[side]||side);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const num = value => Number(value || 0).toLocaleString('zh-CN');
@@ -544,17 +544,36 @@
     if (from >= to) return esc(text);
     return esc(text.slice(0, from - offset)) + '<mark class="raw-search-hit">' + esc(text.slice(from - offset, to - offset)) + '</mark>' + esc(text.slice(to - offset));
   }
-  const rawZones = [[0, 1, 'header', 'Preamble'], [1, 2, 'flag', 'Flag'], [2, 4, 'header', 'Length'],
-    [4, 6, 'header', 'CRC16'], [6, 7, 'header', 'SEQ 低字节'], [7, 8, 'header', 'SEQ 高字节'],
-    [8, Infinity, 'payload', 'Payload']];
+  const headerZones = [[0, 1, 'header', 'Preamble'], [1, 2, 'flag', 'Flag'], [2, 4, 'header', 'Length'],
+    [4, 6, 'header', 'CRC16'], [6, 7, 'header', 'SEQ 低字节'], [7, 8, 'header', 'SEQ 高字节']];
+  const payloadColor = name => ({Command: 'command', Length: 'item-length', Key: 'item-key'}[name] || 'payload');
+  function sourceZones(frame) {
+    if (!frame) return [];
+    const zones = [...headerZones], {payload, items} = frame.fields;
+    const add = (field, name) => {
+      if (field.length) zones.push([field.start, field.start + field.length, payloadColor(field.name), name]);
+    };
+    if (payload.length) add(payload[0], payload[0].name);
+    items.forEach((item, i) => item.forEach(field => add(field, 'Item ' + (i + 1) + ' ' + field.name)));
+    payload.slice(1).forEach(field => add(field, field.name));
+    return zones;
+  }
   function rawMarkup(line, state, match) {
     const span = state.sourceSpans.get(line.n);
     const text = line.text;
     if (!span) return rawSearchMarkup(text, 0, match);
     let i = /^\s*\d{10,16}\s*[,，]\s*/.exec(text)[0].length, nibble = 0, cursor = 0, out = '';
-    for (const [from, to, color, label] of rawZones) {
-      const start = Math.max(from, span.frameStart), end = Math.min(to, span.frameStart + span.length);
-      if (start >= end) continue;
+    const {zones, fieldTarget} = state;
+    const spanEnd = span.frameStart + span.length;
+    let lo = 0, hi = zones.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (zones[mid][1] <= span.frameStart) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let zone = lo; zone < zones.length && zones[zone][0] < spanEnd; zone++) {
+      const [from, to, color, label] = zones[zone];
+      const start = Math.max(from, span.frameStart), end = Math.min(to, spanEnd);
       const first = (span.sourceStart + start - span.frameStart) * 2;
       const last = (span.sourceStart + end - span.frameStart) * 2 - 1;
       let left = 0, right = 0;
@@ -564,9 +583,11 @@
         if (nibble++ === last) { right = ++i; break; }
       }
       const anchor = from === 6 || from === 7;
+      const active = fieldTarget && start < fieldTarget.end && end > fieldTarget.start;
       out += rawSearchMarkup(text.slice(cursor, left), cursor, match) +
-        '<span class="packet-source packet-' + color + (anchor ? ' seq-byte-mark" tabindex="-1" data-source-byte="' + state.index + ':' + from : '') +
-        '" title="' + label + ' · 偏移 ' + offsetLabel(start, end - start) + '">' +
+        '<span class="packet-source packet-' + color + (anchor ? ' seq-byte-mark' : '') + (active ? ' is-field-target' : '') + '"' +
+        (anchor ? ' data-source-byte="' + state.index + ':' + from + '"' : '') + (active ? ' tabindex="-1"' : '') +
+        ' title="' + esc(label) + ' · 偏移 ' + offsetLabel(start, end - start) + '">' +
         rawSearchMarkup(text.slice(left, right), left, match) + '</span>';
       cursor = right;
     }
@@ -592,14 +613,16 @@
       '<button class="mono" data-locate-byte="' + index + ':' + a.frameOffset + '" title="定位序号' + a.role + ' · L' + a.line + '">' +
       a.value + '</button>').join('') + '</span>';
     const slot = name === 'Command' ? ' command-slot' : name === 'Item 1 Key' ? ' key-slot' : '';
-    return '<tr class="packet-' + color + slot + '"><th scope="row">' + esc(name) + '</th><td class="mono">' + offsetLabel(start, length) +
+    const locator = length ? ' data-field-start="' + start + '" data-field-length="' + length + '"' : '';
+    const heading = length ? '<button type="button" class="field-locate" title="定位原文字节" aria-pressed="false">' + esc(name) + '</button>' : esc(name);
+    return '<tr class="packet-' + color + slot + '"' + locator + '><th scope="row">' + heading + '</th><td class="mono">' + offsetLabel(start, length) +
       '</td><td class="packet-byte-cell">' + source + '</td><td>' + esc(value) + '</td></tr>';
   }
   const itemsPerPage = 6;
   function itemRows(frame, page) {
     const first = page * itemsPerPage;
     return frame.fields.items.slice(first, first + itemsPerPage).map((item, i) => item.map(field =>
-      fieldRow(frame, field, 'payload', null, 'Item ' + (first + i + 1) + ' ' + field.name)).join('')).join('');
+      fieldRow(frame, field, payloadColor(field.name), null, 'Item ' + (first + i + 1) + ' ' + field.name)).join('')).join('');
   }
   function packetInspector(frame, index) {
     if (!frame) return '';
@@ -607,41 +630,55 @@
     const pagination = items.length <= itemsPerPage ? '' : '<div class="packet-item-pages"><button class="button compact" data-item-page="-1" disabled>上一组</button>' +
       '<span aria-live="polite">Item 1–' + itemsPerPage + ' / ' + num(items.length) +
       '</span><button class="button compact" data-item-page="1">下一组</button></div>';
-    return '<section class="packet-inspector" aria-label="报文字段解析"><h4>报文字段解析</h4><p>从帧首按 0 计数 · 多字节帧头字段按小端解码</p>' +
+    return '<section class="packet-inspector" aria-label="报文字段解析"><h4>报文字段解析</h4><p>点击字段定位原文 · 偏移从 0 计数 · 帧头多字节字段按小端解码</p>' +
       '<table class="packet-inspector-table"><thead><tr><th scope="col">字段</th><th scope="col">偏移</th><th scope="col">原始字节</th><th scope="col">解码值</th></tr></thead>' +
       '<tbody><tr class="packet-header packet-group"><th colspan="4" scope="rowgroup">Header 帧头</th></tr>' +
       header.map(field => fieldRow(frame, field, field.start === 1 ? 'flag' : 'header', index)).join('') +
       '</tbody><tbody><tr class="packet-payload packet-group"><th colspan="4" scope="rowgroup">Payload' + (payload.length ? '' : ' · 0 字节') +
-      '</th></tr>' + payload.slice(0, 1).map(field => fieldRow(frame, field, 'payload', index)).join('') + '</tbody>' +
+      '</th></tr>' + payload.slice(0, 1).map(field => fieldRow(frame, field, payloadColor(field.name), index)).join('') + '</tbody>' +
       '<tbody class="packet-items">' + itemRows(frame, 0) + '</tbody><tbody>' +
       payload.slice(1).map(field => fieldRow(frame, field, 'payload', index)).join('') + '</tbody></table>' + pagination + '</section>';
   }
-  async function revealByte(target, scrollSection = false) {
-    const [section, offset] = target.split(':').map(Number), state = logStates[section];
-    const anchor = state?.section.frame?.anchors.find(a => a.frameOffset === offset);
-    if (state && anchor && !$('codeSections').querySelector('[data-source-byte="' + target + '"]')) {
-      scrollLogTo(state, anchor.line); await loadLogWindow(state, true);
-      if (!state.code.isConnected) return;
-    }
-    const mark = $('codeSections').querySelector('[data-source-byte="' + target + '"]');
-    if (!mark) return;
-    const code = mark.closest('.code'), box = code.getBoundingClientRect(), at = mark.getBoundingClientRect();
-    if (at.left < box.left + 60 || at.right > box.right - 12) code.scrollLeft += at.left - box.left - 85;
-    if (at.top < box.top + 5 || at.bottom > box.bottom - 5) code.scrollTop += at.top - box.top - 36;
-    if (scrollSection) {
-      const parent = $('codeSections');
-      const location = mark.getBoundingClientRect(), viewport = parent.getBoundingClientRect();
-      if (location.top < viewport.top + 8 || location.bottom > viewport.bottom - 8) parent.scrollTop += location.top - viewport.top - 70;
-      mark.focus({preventScroll: true});
-    }
+  function revealSourceColumns(code, marks) {
+    if (!marks.length) return;
+    const box = code.getBoundingClientRect();
+    const rects = Array.from(marks, mark => mark.getBoundingClientRect());
+    let left = Math.min(...rects.map(rect => rect.left)), right = Math.max(...rects.map(rect => rect.right));
+    if (right - left > code.clientWidth - 76) ({left, right} = rects[0]);
+    if (left < box.left + 60 || right > box.right - 12) code.scrollLeft += left - box.left - 66;
+  }
+  function updateFieldButtons(state) {
+    state.element.querySelectorAll('.field-locate').forEach(button => {
+      const {fieldStart, fieldLength} = button.closest('tr').dataset;
+      const target = state.fieldTarget;
+      button.setAttribute('aria-pressed', String(!!target && Number(fieldStart) < target.end && Number(fieldStart) + Number(fieldLength) > target.start));
+    });
+  }
+  async function locateField(state, start, length, label) {
+    const end = start + length;
+    const spans = state.section.frame.sourceSpans.filter(span => span.frameStart < end && span.frameStart + span.length > start);
+    if (!spans.length) return;
+    const firstLine = spans[0].line, lastLine = spans.at(-1).line;
+    const target = {start, end, label, lines: firstLine === lastLine ? 'L' + firstLine : 'L' + firstLine + '–L' + lastLine};
+    state.fieldTarget = target;
+    updateFieldButtons(state);
+    const visible = Math.floor(state.code.clientHeight / LOG_ROW_HEIGHT);
+    scrollLogTo(state, firstLine, Math.min(4, Math.max(0, visible - (lastLine - firstLine + 1))));
+    await loadLogWindow(state, true);
+    if (!state.code.isConnected || state.fieldTarget !== target) return;
+    const marks = state.window.querySelectorAll('.is-field-target');
+    if (!marks.length) return;
+    revealSourceColumns(state.code, marks);
+    state.code.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    marks[0].focus({preventScroll: true});
   }
   function logUnit(state) {
     const visible = Math.ceil(state.code.clientHeight / LOG_ROW_HEIGHT);
     return state.height < state.section.totalLines * LOG_ROW_HEIGHT ?
       (state.height - state.code.clientHeight) / Math.max(1, state.section.totalLines - visible) : LOG_ROW_HEIGHT;
   }
-  function scrollLogTo(state, line) {
-    state.code.scrollTop = Math.max(0, line - 5) * Math.max(.001, logUnit(state));
+  function scrollLogTo(state, line, preceding = 4) {
+    state.code.scrollTop = Math.max(0, line - 1 - preceding) * Math.max(.001, logUnit(state));
   }
   async function loadLogWindow(state, force = false) {
     if (!state.code.isConnected) return;
@@ -664,7 +701,9 @@
         '</span><code>' + rawMarkup(l, state, l.n === match?.line ? match : null) + '</code></div>').join('');
       if (result.lines.some(l => l.n === currentLine)) state.code.setAttribute('aria-activedescendant', 'log-line-' + state.index + '-' + currentLine);
       else state.code.removeAttribute('aria-activedescendant');
-      state.status.textContent = 'L' + first + '–L' + (first + result.lines.length - 1) + ' / 共 ' + num(result.total) + ' 行 · 点击行查看解析';
+      const field = state.fieldTarget;
+      state.status.textContent = (field ? field.label + ' · 偏移 ' + offsetLabel(field.start, field.end - field.start) + ' · ' + field.lines + ' ｜ ' : '') +
+        'L' + first + '–L' + (first + result.lines.length - 1) + ' / 共 ' + num(result.total) + ' 行';
     } catch (error) {
       if (ticket === state.ticket && state.code.isConnected && error.message !== '已取消') state.status.textContent = '读取失败：' + error.message;
     }
@@ -727,7 +766,7 @@
         (s.frame ? E.timingText(s.frame.timing) + '\n' : '') +
         s.lines.map(l => (l.n == null ? '' : 'L' + l.n + '  ') + l.text).join('\n')).join('\n\n');
     $('contextNote').textContent = '可滚动浏览完整文件，点击行同步更新解析；↑ / ↓ 选择相邻行，Home / End 到文件首尾。' +
-      (e.kind === 'gap' ? '颜色对应缺号区间前后的实际报文。' : '点击字段表中的序号字节可跳到对应原文。');
+      (e.kind === 'gap' ? '颜色对应缺号区间前后的实际报文。' : '点击字段表中的任意有字节的字段，可定位并高亮对应原文。');
     const key = [e.id, e.source, e.line, d.selectedLine].join(':');
     if (key === detailKey && logStates.length && logStates[0].code.isConnected) return;
     detailKey = key;
@@ -740,15 +779,17 @@
     logStates = d.sections.map((s, index) => {
       const el = $('codeSections').querySelector('[data-log-section="' + index + '"]'), code = el.querySelector('.code');
       const height = Math.max(LOG_ROW_HEIGHT, Math.min(8000000, s.totalLines * LOG_ROW_HEIGHT));
-      const state = {section: s, index, code, height, window: el.querySelector('.log-window'), status: el.querySelector('.log-status'), ticket: 0,
+      const state = {section: s, index, code, height, element: el, window: el.querySelector('.log-window'), status: el.querySelector('.log-status'), ticket: 0,
         selectedLine: d.selectedLine || s.line, first: null, itemPage: 0,
-        sourceSpans: new Map(s.frame?.sourceSpans.map(span => [span.line, span]))};
+        sourceSpans: new Map(s.frame?.sourceSpans.map(span => [span.line, span])), zones: sourceZones(s.frame), fieldTarget: null};
       const canvas = el.querySelector('.log-canvas'); canvas.style.height = height + 'px';
       canvas.style.minWidth = Math.max(code.clientWidth, (s.maxLineLength + 12) * 7.3) + 'px';
       if (options.position?.source === s.side) { code.scrollTop = options.position.top; code.scrollLeft = options.position.left; }
       else scrollLogTo(state, s.frame?.anchors[0]?.line || s.line);
       code.onscroll = () => { if (!state.scheduled) { state.scheduled = true; requestAnimationFrame(() => { state.scheduled = false; loadLogWindow(state); }); } };
-      loadLogWindow(state, true).then(() => { if (!options.position && s.frame) revealByte(index + ':6'); });
+      loadLogWindow(state, true).then(() => {
+        if (!options.position && s.frame && !state.fieldTarget) revealSourceColumns(code, state.window.querySelectorAll('.seq-byte-mark'));
+      });
       return state;
     });
     $('codeSections').scrollTop = 0;
@@ -899,16 +940,26 @@
   $('rawSearchPrev').onclick = () => { if (rawSearchResult) searchRaw(rawSearchResult.index - 1); };
   $('rawSearchNext').onclick = () => { if (rawSearchResult) searchRaw(rawSearchResult.index + 1); };
   $('codeSections').addEventListener('click', e => {
-    const button = e.target.closest('[data-locate-byte]');
-    if (button) { revealByte(button.dataset.locateByte, true); return; }
     const section = e.target.closest('[data-log-section]'), state = section && logStates[Number(section.dataset.logSection)];
     if (!state) return;
+    const byte = e.target.closest('[data-locate-byte]');
+    if (byte) {
+      const offset = Number(byte.dataset.locateByte.split(':')[1]);
+      locateField(state, offset, 1, offset === 6 ? 'SEQ 低字节' : 'SEQ 高字节');
+      return;
+    }
+    const row = e.target.closest('[data-field-start]');
+    if (row && !e.target.closest('.field-bytes') && (e.target.closest('.field-locate') || window.getSelection().isCollapsed)) {
+      locateField(state, Number(row.dataset.fieldStart), Number(row.dataset.fieldLength), row.querySelector('button').textContent);
+      return;
+    }
     const itemPage = e.target.closest('[data-item-page]');
     if (itemPage) {
       const frame = state.section.frame, total = frame.fields.items.length;
       state.itemPage += Number(itemPage.dataset.itemPage);
       const start = state.itemPage * itemsPerPage;
       section.querySelector('.packet-items').innerHTML = itemRows(frame, state.itemPage);
+      updateFieldButtons(state);
       section.querySelector('.packet-item-pages span').textContent = 'Item ' + (start + 1) + '–' + Math.min(start + itemsPerPage, total) + ' / ' + num(total);
       section.querySelector('[data-item-page="-1"]').disabled = state.itemPage === 0;
       section.querySelector('[data-item-page="1"]').disabled = start + itemsPerPage >= total;

@@ -8,12 +8,12 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' blob:; script-src 'self'; worker-src blob:; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>AB 日志分析</title>
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./style.css?v=1.7.3">
+  <link rel="stylesheet" href="./style.css?v=1.7.4">
   <script src="./connections.js?v=1.7.1" defer></script>
   <script src="./engine.js?v=1.7.3" defer></script>
   <script src="./worker.js?v=1.7.1" defer></script>
   <script src="./history.js?v=1.7.1" defer></script>
-  <script src="./app.js?v=1.7.3" defer></script>
+  <script src="./app.js?v=1.7.4" defer></script>
 </head>
 <body>
 <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -38,7 +38,7 @@
       <button class="navbtn" data-mode="connections" disabled><svg class="ico"><use href="#i-history"/></svg>连接时间线<span id="connectionCount" class="count">—</span></button>
     </nav>
     <div id="sourceNote" class="file-note">导入同一设备的日志，可附加连接诊断文件，按连接分段核对。</div>
-    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.7.3 · 网页工具</span></div>
+    <div class="side-bottom"><strong>文件仅在本机处理</strong><span>可保存到当前浏览器的本机历史</span><span class="version">v1.7.4 · 网页工具</span></div>
   </aside>
   <main class="main">
     <header class="topbar">
@@ -162,7 +162,7 @@
 </dialog>
 <dialog id="aboutDialog"><div class="dialog-heading"><h2>判定说明</h2><button class="button compact" data-close>关闭</button></div>
   <ul class="rules"><li>支持附加 bleConnection 连接诊断，或单独导入连接诊断文件。有序 ble_session 标记优先于异步连接回调，用于停止跨连接组包和序号统计。旧版 Disconnected、Link-lossOccur、Connected 和连接错误也保留为可定位的事件。</li><li>连接时间线分别显示尝试、链路连接、就绪和首次有效报文。“断开相关记录”是回调记录数，不是断线次数。重试耗尽、状态码和等待时长仅描述对应事件，不倒推最初断开原因。</li><li>连接编号只在一次应用进程内解释；重启后可以复用。不同文件只有相同结构化事件才去重并保留两处原文，没有锚点的诊断文件独立展示，不按时间强行切分报文。过滤日志只有唯一的接收时间戳与完整帧配对才关联原始会话；无法关联的报文范围单列待核对。</li><li>原始日志中的 backward_dup 决策仅在时间戳和序号唯一匹配时附到“仅原始有”明细。timeout_force 等未能唯一关联的文字仍保留原文，不自动认定蓝牙丢包或过滤错误。导出全部结果包含连接事件；本机历史可以同时保存三份原始文件。</li><li>按源日志的记录顺序分析，所有命令共用一个 16 位序号。</li><li>先跳号、后补到的报文列为“乱序补到”；只有本段完整分析后仍未出现的序号列为“最终缺号”。文件首尾范围之外不补缺号。</li><li>同一段的同一周期同号且完整帧相同为重复；同号但内容不同单独列示。65535 → 0 为正常回绕。</li><li>周期按距离最近的序号作为候选解释，不能由此确定实际前进或回退。恰好相差半周期，或向观测范围之前倒退超过 4096 个序号时保守分段；小范围的开头补到仍参与同段统计。</li><li>序号跳变：候选序号链后移后至少 4 条连续递增，且移至本段起点之前、距已见最大值超过 4096；或随后最多 8 条中至少 3 个已出现序号带有新内容，标为“序号跳变待核对”。记录前后数值可能增大，也可能减小；详情分别展示数值变化和待核对状态。阈值只是工程默认值，不能证明方向或重启。普通缺口补到、原样重复和孤立同号异内容仍沿用原判定。</li><li>不同分析段不互相填补缺号。段内缺号为 0 不代表整份日志完整；段间是否缺失、是否重置或重放需要设备端记录确认。同一设备有明确连接记录时按真实边界分段；无连接证据时仍保守判断序号。多设备混合及跨周期极端迟到无法仅凭序号还原。</li><li>支持分片与一行多帧。只有完整帧且 CRC16 校验通过的序号参与统计。无法解析的记录保留原文。</li><li>缺号描述本日志的缺口，不直接等于蓝牙丢包。过滤后的缺号可能来自正常过滤。</li><li>配对依据原始接收时间戳与完整帧，逐次匹配，并显示出现次数及顺序差异；相同时间戳、相同帧的重复对应关系列为待核对。比较只呈现事实，不推测过滤原因。</li><li>图表概览保留每段最高与最低点，同位置的异常标记显示数量。普通报文也可点击；概览点击最近的实际采样记录，局部放大或使用相邻报文按钮逐包查看。原文可滚动完整文件，点击行同步更新序号、帧头与命令 / Key。一行多帧提供选择，非有效报文行清空解析；查看普通报文不改变异常统计和导出。</li><li>上包间隔按同一日志中相邻有效报文的接收时间相减，不按序号排序，不受命令筛选影响；分片使用起始片段时间，同一时间戳显示 0 ms，负值表示时间戳回退。跨分析段仍显示日志中的实际时间差；这不是设备采样周期或蓝牙空口时延。</li><li>勾选保存时，完成分析的完整日志会保存在当前浏览器的本机历史；演示和取消的任务不保存。不勾选且未手动保存的任务仅在当前页面保留。历史支持重新打开、搜索和删除；清除本站数据或关闭无痕窗口会丢失历史。没有日志上传、在线接口或外部统计。</li></ul>
-  <p class="small">序号默认同时显示 HEX 和十进制。AB 帧内偏移 6、7（第 7、8 字节）是序号，低字节在前。例如原文 04 84 = 0x8404 = 十进制 33796。选中报文后，原文以蓝色标记帧头、橙色标记 Flag、绿色标记 Payload，字段表同时显示偏移、原始字节和解码值。选择缺号记录时，原文标注该区间前后的实际报文。</p>
+  <p class="small">序号默认同时显示 HEX 和十进制。AB 帧内偏移 6、7（第 7、8 字节）是序号，低字节在前。例如原文 04 84 = 0x8404 = 十进制 33796。点击字段表里的字段可跳转并高亮原文字节，跨行时各段都标注。Command 为紫色，Item Length 为金黄色，Item Key 为青色。选择缺号记录时，原文标注该区间前后的实际报文。</p>
   <p class="small">日志格式：毫秒时间戳,十六进制报文。命令取消息体首字节；原文详情中的 Key 只展示首个可用值，报文查询则按协议遍历所有有效 Key，匹配其中任一项。Key 结构不完整时仍可按 Command 查询，但不会作为 Key 匹配结果。</p>
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

@@ -88,17 +88,42 @@ async function load(p,file,mode='raw'){
     ok('One physical row exposes both reassembled frame choices',await page.locator('[data-record-choice]').count()===2);
     await page.locator('[data-record-choice="1"]').click();await expectSid(page,'0x0065');
     ok('Choosing the second same-line packet updates command/key and exact header',(await page.locator('.command-slot').innerText()).includes('0x01')&&(await page.locator('.key-slot').innerText()).includes('0x16'));
-    await page.waitForFunction(()=>document.querySelector('[data-log-line="3"] .packet-source.packet-payload')?.textContent==='01021600');
+    await page.waitForFunction(()=>document.querySelector('[data-log-line="3"] .packet-source.packet-command')?.textContent==='01');
     ok('Only the second frame is marked on the shared physical line',
       (await page.locator('[data-log-line="3"] .packet-source').allTextContents()).join('') === b);
+    const colors = [];
+    for (const [kind, name, byte] of [['command','Command','01'],['item-length','Item 1 Length','02'],['item-key','Item 1 Key','16']]) {
+      const row = page.locator('.packet-inspector-table tr.packet-' + kind).first();
+      const source = page.locator('.packet-source.packet-' + kind).first();
+      const tableColor = await row.locator('.packet-byte-cell').evaluate(el => getComputedStyle(el).backgroundColor);
+      ok(name + ' uses matching colors in the table and original log',
+        tableColor === await source.evaluate(el => getComputedStyle(el).backgroundColor));
+      colors.push(tableColor);
+      await row.locator('td').last().click();
+      await page.waitForFunction(expected => document.querySelector('.is-field-target')?.textContent === expected, byte);
+      ok(name + ' locates only its exact byte on the shared source line',
+        await page.locator('.is-field-target').count() === 1 &&
+        await row.getByRole('button', {name, exact:true}).getAttribute('aria-pressed') === 'true');
+    }
+    ok('Command, Item Length and Item Key have distinct colors',new Set(colors).size === 3);
     await page.locator('#kindFilter').selectOption('duplicate');
     await page.waitForFunction(()=>document.querySelector('#detailTitle').textContent.includes('没有选中的记录'));
     ok('An empty anomaly filter clears frame choices and the previous parsing',!await page.locator('#recordChoices').isVisible()&&await page.locator('.command-slot').count()===0);
     await page.locator('#kindFilter').selectOption('all');await page.locator('[data-log-line="3"]').click();
     await page.locator('#recordChoices').waitFor({state:'visible'});
     await page.locator('[data-record-choice="0"]').click();await expectSid(page,'0x0064');
+    await page.getByRole('button',{name:'TID / SEQ',exact:true}).press('Enter');
+    await page.waitForFunction(()=>document.querySelectorAll('.is-field-target').length===2);
+    ok('The complete SEQ field marks both source lines and skips the diagnostic row',
+      (await page.locator('.is-field-target').allTextContents()).join('')==='6400' &&
+      await page.locator('[data-log-line="1"] .is-field-target').count()===1 &&
+      await page.locator('[data-log-line="3"] .is-field-target').count()===1 &&
+      await page.locator('[data-log-line="2"] .is-field-target').count()===0);
     await page.locator('[data-locate-byte="0:7"]').click();
+    await page.waitForFunction(()=>document.activeElement?.matches('[data-source-byte="0:7"]'));
     ok('Fragmented high-byte locator jumps to the correct line',await page.evaluate(()=>document.activeElement?.closest('.code-line').dataset.logLine==='3'));
+    ok('Individual SEQ byte selection clears the previously active low byte',
+      await page.locator('.is-field-target').count()===1 && await page.locator('.is-field-target').innerText()==='00');
     ok('Fragmented frame highlights only its own bytes on both source lines',
       (await page.locator('.packet-source').allTextContents()).join('') === a);
     await page.locator('[data-log-line="2"]').click();
@@ -107,7 +132,10 @@ async function load(p,file,mode='raw'){
       await page.locator('.packet-source,.packet-inspector').count()===0);
     const largeValue = Array.from({length: 32}, (_, i) => i);
     const manyItems = E.makeFrame(200,[0x7b,...Array.from({length:6},()=>[1,0x11]).flat(),33,0x12,...largeValue]);
-    await load(page,{name:'multi-item.txt',mimeType:'text/plain',buffer:Buffer.from(base+','+manyItems)});
+    const fragments = [base+','+manyItems.slice(0,46), ...Array.from({length:35},()=> '# diagnostic'),
+      (base+1)+'，'+manyItems.slice(46,70).match(/../g).join(' '), (base+2)+','+manyItems.slice(70)];
+    await load(page,{name:'multi-item.txt',mimeType:'text/plain',buffer:Buffer.from(fragments.join('\n'))});
+    ok('The long value starts outside the original virtual window',await page.locator('[data-log-line="37"]').count()===0);
     await page.getByRole('button',{name:'下一组'}).click();
     const finalValue = page.locator('.packet-items tr').filter({hasText:'Item 7 Value'});
     ok('Item paging keeps the final value offset and full byte length',
@@ -116,6 +144,21 @@ async function load(p,file,mode='raw'){
     ok('Expanded values retain every raw byte',
       await finalValue.locator('details > code').innerText() ===
         manyItems.slice(46).toUpperCase().match(/../g).join(' '));
+    await page.setViewportSize({width:390,height:850});
+    await finalValue.getByRole('button',{name:'Item 7 Value',exact:true}).click();
+    await page.waitForFunction(()=>document.activeElement?.closest('.code-line')?.dataset.logLine==='37');
+    ok('A cross-line Value jumps outside the old window and highlights exactly its bytes',
+      (await page.locator('.is-field-target').allTextContents()).join('').replace(/\s/g,'')===manyItems.slice(46));
+    ok('Both fragments of the Value are visible after the jump',
+      await page.locator('.log-viewport').evaluate(el=>{
+        const viewport = el.getBoundingClientRect();
+        const targets = [...el.querySelectorAll('.is-field-target')];
+        return targets.length===2 && targets.every(target=>{
+          const box = target.getBoundingClientRect();
+          return box.top>=viewport.top && box.bottom<=viewport.bottom;
+        });
+      }));
+    await page.setViewportSize({width:1440,height:1080});
     if(process.env.AB_ROLLBACK_LOG){
       await load(page,process.env.AB_ROLLBACK_LOG);
       await page.waitForFunction(()=>document.querySelectorAll('.seq-byte-mark').length===4);
